@@ -74,7 +74,7 @@ int main(void)
     };
     const float uv[2][6]={{.1f,0,.2f,0,.3f,0},{.4f,0,.5f,0,.6f,0}};
     const unsigned short indices[3]={0,2,1};
-    const struct native_geometry geometry[2]={
+    struct native_geometry geometry[2]={
         {3,3,vertices[0],uv[0],indices},
         {3,3,vertices[1],uv[1],indices}
     };

@@ -1,5 +1,855 @@
 # Native 60 FPS goal: current review
 
+An A30 terrain audit found 3,552 bump draws with the cutout test enabled
+even though their base maps contained only opaque texels. This included
+all 242 bump draws in the held-view window. The opt-in
+`--probe-opaque-terrain-alpha` comparison caches that fact on the existing
+immutable texture revision. It checks the bound sampler and every mip,
+and retains the test for genuine cutouts, border sampling and unknown
+textures. Its host fixture covered opaque and mixed mip chains, revision
+changes and sampler fallback. A private route bypassed all 3,552 tests
+and matched all seven 400×240 Azahar captures in RGBA and D24S8.
+The built probe also completed all five paused phases at the held
+dropship, with two eligible draws per frame and both bypassed only in
+candidate phases. All five full color and depth/stencil captures matched.
+The emulator sessions exited.
+
+A separate lightmap-only experiment retained the canonical decoder and
+packed the fully opaque texels as RGB8 before publication. All seven
+captures matched in both planes. Eight lightmaps saved a total of 8 KiB
+of resident payload on this route. The temporary packing allocation
+and the CPU consumers that assume RGBA8 still need a broader review
+before using this layout outside the fixture. The audit and both image
+comparisons are under `build/performance-a30-terrain-texture-audit`.
+The normal-audio alpha probe and its console instructions are under
+`build/performance-a30-opaque-terrain-alpha`. Physical queue timing
+remains pending.
+
+The separate `--probe-late-sky` launcher compares the original sky with
+the stencil-masked sky in five alternating phases at the same paused
+400×240 view. Its guard checks the weapon and hands before deferring the
+sky draw and preserves the original order for active camouflage and
+immediate blended materials. The log distinguishes a timed fallback from
+a timed candidate frame.
+
+Two scripted Azahar/Vulkan runs reached the held A30 dropship view. With
+the starting assault rifle, the guard kept the original order throughout.
+After switching to the pistol, the candidate ran on all 24 timed frames
+in its two phases. Five paused-view captures matched in RGBA, depth and
+the original stencil bits. Only the new terrain stencil bit differed,
+at 61,062 pixels in each candidate capture. Both runs exited. The
+normal-audio console launcher, instructions and log comparison tool are
+under `build/performance-a30-late-sky-probe`. Native timing and image
+validation are pending.
+
+Private A30 sky experiments deferred the sky's GPU draws until after the
+first-person weapon and terrain. Sky animation, poses and lens-flare
+queueing stayed in their original CPU phase. The first test missed the
+separate sky water path and changed color at four route captures. With
+the same visibility test applied to water, all seven regular 400×240
+Azahar/Vulkan captures matched the reference in RGBA and D24S8.
+
+A pre-sky depth readback found that all 96,000 pixels were already covered
+in three approach samples. In the held dropship view, terrain covered
+54,312 pixels and the weapon covered another 10,183, for 67.2% combined.
+These are framebuffer coverage counts. They do not measure shaded sky
+fragments or PICA queue savings.
+
+A second private variant marked opaque terrain with stencil bit 1 while
+preserving the weapon's bit 0. The sky then used both bits as a visibility
+mask. This avoids treating the clear depth value as proof that no opaque
+fragment was written. In all seven captures, RGBA, depth and the original
+stencil bits matched. The added terrain bit stayed unchanged through the
+rest of each sampled frame. All five emulator runs exited. The overlays,
+route captures and ten-map weapon material audit are under
+`build/performance-a30-late-sky`. Some first-person weapons contain
+immediate blended materials that can depend on the sky already being
+drawn. These experiments remain private pending an admission rule for
+those materials and native timing and image checks.
+
+The independent `--byte-model-indices` candidate packs recurring static
+world-model triangle lists into the existing resident index arena. It
+preserves triangle order and materials and falls back to the normal
+16-bit path for wider indices or when residency is unavailable. The host
+fixture exercised repeat admission, the 255/256 boundary, capacity, failed
+cache flushes, epoch changes and low linear-memory headroom.
+
+With the fixed 400×240 renderer suite, all seven A30 Azahar captures matched
+the reference byte for byte in color and depth/stencil. Camera samples and
+the final simulation tick also matched. Across 1,320 reported frames,
+32,993 draws used byte indices for 10,317,147 elements. The resident arena
+peak fell from 118,404 to 109,424 bytes, with 112 resident uploads in each
+mission run. The element count measures submitted payload, which the GPU
+can fetch and cache differently on hardware. Both emulator runs used fixed
+inputs and muted audio and exited. The normal-audio console pair under
+`build/performance-a30-byte-residency` keeps both launchers at fixed
+400×240 with the regular scheduler. Hardware timing is pending.
+
+An earlier private A30 test fed authored strips directly to PICA and
+matched the same seven captures. It submitted about 37% fewer index
+elements on the converted draws, alongside 12,984,607 degenerate connector
+triangles over the route. The asset audit found 135,895 connector triangles
+and 138,123 nondegenerate triangles across A30's 789 authored strips.
+The resident byte candidate keeps the existing connector removal.
+
+Renderer suite v3 combines the earlier model, shader and command changes
+with hierarchical terrain culling. Both launchers use the same 400×240
+settings, 4 MiB texture budget, touch controls and `--present-60` scheduler.
+The candidate writes `halo-a30-present60-render-suite-v3.log`.
+
+All seven regular route captures and both opening presentation captures
+matched full RGBA and D24S8 in Azahar. At the held view the combined
+candidate omitted 991 model and 1,716 terrain triangles per regular frame.
+The fixtures used fixed inputs, muted audio and the New 2DS XL path in
+Azahar. The opening in-between capture widened the deadline. The console
+launchers use normal audio and the ordinary scheduling deadlines. All four
+emulator sessions exited. The files under `build/performance-a30-render-suite-v3`
+include a selected-window log comparison that checks camera and hardware
+settings and counts acknowledgements separately from submissions. Native
+frame delivery and image parity remain to be measured.
+
+The opt-in `--algo-bsp-clip-hierarchy candidate` adds up to four 8-triangle
+subgroups to each 32-triangle terrain group. Fully rejected groups are
+skipped immediately. Intersecting groups test their subgroups only against
+the relevant planes. Both variants compare projection bytes once per view
+and reuse the retained index list across matching views.
+
+Against the flat 32-triangle reference, the hierarchy omitted 725 more
+triangles per frame on average across the 90 sampled approach frames. It
+performed 71,111 plane tests, compared with 26,026. At the held view it
+omitted 1,716 triangles per frame versus 1,042, with zero plane tests in
+both steady windows after cache warm-up. The held metadata and index
+allocations rose from 14,320 and 57,504 bytes to 71,600 and 59,262 bytes.
+The four 400×240 Azahar snapshots matched every RGBA and D24S8 word. The
+private route used fixed inputs and muted audio and both runs exited.
+The fixed-resolution console pair under `build/performance-a30-bsp-clip-hierarchy`
+isolates the CPU and GPU trade-off. Physical timing remains pending.
+
+The opt-in `--algo-bsp-clip-blocks candidate` caches bounds for contiguous
+terrain blocks after cluster filtering. A filtered-list revision invalidates
+the bounds when its indices change. The cache reuses compacted indices for
+matching views or rejection masks and protects same-frame GPU readers.
+Admission covers ordinary New-model mono views and streams of 32 triangles
+through 16,384 index elements. Metadata and index storage each have a 256 KiB
+budget. The A30 held sample used 14,320 metadata bytes and 57,504 index bytes.
+
+The host checks covered retained order, cluster-list changes, same-frame
+buffer ownership, allocation fallback and the existing adjacent batch path.
+The 400×240 Azahar pair matched all RGBA and D24S8 words at ticks 618, 660,
+690 and 1305. In each steady 30-frame held window it omitted 31,260 triangles
+and reused 330 cached lists with zero bounds builds. Both scripted runs used
+fixed input and muted audio and exited cleanly. The fixed-400 console pair
+is staged under `build/performance-a30-bsp-clip-blocks`, and the candidate
+also compiles with `--present-60`. Native image parity and timing are pending.
+
+A private terrain audit sampled actual submissions after cluster filtering,
+material frustum checks and adjacent batching. At the held A30 dropship
+view it found 2,522 of 4,223 triangles entirely beyond a common lateral
+clip plane per triangle. A further 225 met the diagnostic back-face test.
+Across ten sampled views, 25,128 of 40,948 submitted triangles met the
+lateral-plane test. These are float32 diagnostic counts, with a guard band,
+from ordinary mono terrain submissions. The audit retained the original
+draws, and all four keyframes matched the v2 candidate in RGBA and D24S8.
+Receipts are under `build/performance-a30-terrain-rejection-audit`.
+
+A second private run omitted contiguous blocks of up to 32 triangles when
+their entire vertex box was beyond a side plane. It copied surviving spans
+in their original order into the existing per-frame index arena. It omitted
+1,054 of 4,223 triangles at the held view and 12,925 of 40,948 across all
+ten sampled views. The four keyframes again matched exactly in RGBA and
+D24S8, and both emulator runs exited. Both used deterministic controls and
+muted audio. The prototype rebuilt bounds at each sample. Those results
+guided the retained candidate above.
+
+The second A30 renderer suite adds the homogeneous model and effect shader
+paths and cached model culling to the earlier prepared-view, compact-command
+and shader candidates. Both native launchers use 400×240, a 4 MiB texture
+cache, the same `--present-60` scheduler, normal audio and touch controls.
+The candidate writes `halo-a30-present60-render-suite-v2.log`. The staged
+pair and console instructions are in `build/performance-a30-render-suite-v2`.
+
+The private Azahar runs matched full RGBA and D24S8 for the opening keyframe
+and midpoint at tick 295 and the regular views at ticks 618, 660, 690 and
+1305. The later captures were taken immediately after the regular submission.
+The candidate reproduced the isolated culling counts at the moving and held
+views. The fixtures used deterministic input, muted audio and enabled the
+New 2DS XL presentation path in Azahar. The opening fixture widened the
+optional frame deadline. All four emulator runs exited. The production
+launchers use the ordinary deadlines and remain pending native verification.
+
+The opt-in `--algo-model-clip-bounds candidate` retains one local box per
+used palette slot for immutable model streams. The normal mono view tests
+camera-relative boxes against the four lateral clip planes. A draw is
+omitted only when every contributing bone is outside the same plane after
+the arithmetic margin. Scenery culling operates on complete batches in
+submission order. Admission is limited to immutable, ordinary world draws
+with supported weights in regular mono views. The minimum is 32 triangles.
+
+The host test passed 12,000 randomized boxes with directed float24
+significand rounding models, including blend cases and explicit lateral
+clip boundaries. The paired 400×240 A30 runs matched full RGBA and D24S8
+at the first tractor-beam submission and the held dropship view. The
+candidate omitted 298,279 triangles across the 30-frame window ending at
+tick 690 and 991 per frame in the sampled held windows. Those are omitted
+submissions and do not measure physical GPU or CPU time. The private runs
+used deterministic input and muted audio and both exited. Native fixed-400
+launchers with normal audio and the log guide are under
+`build/performance-a30-model-clip-bounds`. Hardware parity and timing are
+still required before default enablement.
+
+A private A30 model audit used the same bone rows, camera rebasing and
+projection as the ordinary rigid and skinned draw path. It sampled actual
+indexed submissions and used a deliberately wide float32 clip guard. At
+the first tractor-beam submission (tick 618), 30 of 33 sampled draws and
+7,123 of 7,735 triangles were entirely beyond one clip plane. At the held
+dropship view, five of 98 draws and 991 of 20,024 triangles met that test.
+Sky, first-person, decal, CPU fallback and other passes were outside the
+sample.
+
+The private per-bone bounds prototype skipped a draw only when its bounds
+and the per-vertex audit agreed on the rejecting plane. Across 16 sampled
+views it skipped 94 draws and 26,560 triangles. At the beam it skipped all
+30 eligible draws. At the held capture it skipped three draws containing
+691 triangles. The full 400×240 color and D24S8 buffers matched at both
+captures. Both deterministic runs disabled audio and exited cleanly.
+The files under `build/performance-a30-model-clip-audit` contain the fixture,
+counts and comparison. A production implementation still needs retained
+bounds, a hardware arithmetic error bound and native CPU/GPU timing. The
+diagnostic rebuilt bounds and checked every referenced vertex per sample.
+
+The opt-in `--algo-effect-homogeneous candidate` uses PICA `DPHI` in packed
+particles, Chicago effects, holograms, water and glass. Four programs remove
+two position setup instructions per vertex. Glass removes one and retains
+the temporary XYZ position shared by its posed and unposed branches.
+Hologram projection and projective texture rows preserve their operands and
+output masks. The shader switch composes with the existing water base and
+Boolean candidates, and has its own benchmark pair.
+
+The 400×240 Azahar pair matched every RGBA and D24S8 word across 48 synthetic
+cases covering indexed and non-indexed particles, projective Chicago,
+holograms, water and posed or unposed glass. The paired scripted route also
+matched at tick 618, the first tractor-beam submission, and tick 1305, the
+held dropship view. The route used fixed input and RNG with audio disabled.
+The production pair uses normal audio and the regular presentation policy.
+Both launchers and test instructions are under
+`build/performance-a30-effect-homogeneous`. Native timing remains pending.
+The emulator runs exited.
+
+The opt-in `--algo-model-homogeneous candidate` replaces the bone and
+projection position dot products in ten rigid and skinned PICA programs.
+`DPHI` supplies the homogeneous 1 in the first operand, removing three
+setup instructions on every vertex path. The assembled programs preserve
+the original matrix rows, indexed bone addressing and destination masks.
+Normals, skin weights, materials and output semantics use the original
+paths. The candidate is independent of the A30 renderer suite.
+
+At 400×240, the paired Azahar builds matched every RGBA and D24S8 word
+across 32 lighting, detail and reflection cases, 48 basic/depth/cloak
+transform cases, and the scripted held A30 dropship view at tick 1305.
+The transform cases included zero and mixed weights and palette index 28.
+The private A30 fixture disabled audio and used deterministic inputs.
+The native fixed-resolution pair under `build/performance-a30-model-homogeneous`
+keeps normal audio and uses the regular scheduler to isolate GPU queue
+time. The hardware speedup remains unmeasured. The emulator runs exited.
+
+The first `--a30-render-suite` benchmark combined prepared views, all five
+compact command paths and the UV output, Boolean selector, water base,
+model view, model quaternion, model reflection and Chicago map UV shader
+candidates. The 400×240 reference and suite launchers both use the same
+`--present-60` scheduler, touch controls and 4 MiB texture-cache budget.
+Both are staged under `build/performance-a30-render-suite/SD-card/3ds`.
+
+Azahar matched every RGBA and D24S8 word for the opening keyframe and
+midpoint at tick 295 and the held dropship view at tick 1305. The private
+image fixtures used fixed input and RNG, disabled audio and enabled the
+New 2DS XL path in Azahar. Only the opening fixture widened the midpoint
+deadline to obtain a matching pair. The console launchers use the normal
+deadlines and sound. All four emulator runs exited. Compare acknowledged
+presentations, GPU queue time and skipped midpoints on hardware using the
+normal memory grant. The Dev1 memory test remains a separate comparison.
+
+The rigid and skinned lit shaders now have an independent
+`--algo-model-reflection-direct` candidate. One Boolean selects the output
+path. Both paths write the original exported values directly, and reflective
+vertices skip the unused diffuse defaults. Against the reference, the shader
+executes four fewer instructions for diffuse/detail vertices and seven fewer
+for reflective vertices. The same variant builds with the other model shader
+candidates and `--present-60`.
+
+The paired 400×240 Azahar fixture matched all 32 RGBA and D24S8 pairs,
+including reflective-to-diffuse transitions across a command-list split.
+The scripted A30 held view matched all color and depth/stencil words at tick
+1305. The route used disabled audio for repeatability and recorded 118,851
+lit draws, including 25,417 reflective draws. Those counts are neither vertex
+invocations nor physical timing. The fixed-resolution pair is under
+`build/performance-a30-model-reflection-direct`. The emulator runs exited.
+
+The same route's skin-stream audit found that only about 14% of the sampled
+held-view skinned indices used wholly single-influence streams. The existing
+per-vertex shortcut still handles single-influence vertices in mixed streams.
+An extra per-vertex selector for the whole-stream case was left out.
+
+The opt-in `--algo-chicago-alpha-zero candidate` rejects fragments whose
+final alpha is zero before ordinary source-alpha blending. Chicago masks
+framebuffer alpha and depth writes. Authored cutout tests, the meter blend,
+other blend modes and first-person stencil writers keep their original path.
+The synthetic comparison enabled 41 additional alpha tests and matched all
+color and raw D24S8 words across 16 cases, including filtered alpha edges,
+rigid and skinned draws and same-frame stencil use.
+
+Both scripted A30 runs rendered the dropship beam on the way to the held
+camera and matched the full 400×240 buffers at tick 1305. They used disabled
+audio for repeatability. At the held view the candidate tested 600 sky draws
+per 120-frame window, with no eligible world draws. This counts eligible
+draws, not rejected fragments or time saved. The paired fixed-resolution
+launchers and an independent on-device image check are in
+`build/performance-a30-chicago-alpha-zero`. Native results are pending.
+
+The scripted A30 route now reaches the held dropship viewpoint through
+ordinary movement. It rendered the tractor beam en route, reached the last
+waypoint at tick 1185 and held until tick 1305. Both runs used the same
+waypoints, fixed RNG seed and disabled audio. Neither used the fixture's
+recovery warp. The final camera was within 0.28 world units of the logged
+console position, with nearly identical aim. Both 400×240 captures matched
+full RGBA and D24S8. These are comparable scenes, not identical console
+and emulator simulation histories.
+
+The independent `--probe-world-pixel-passes` launcher splits sky, opaque
+terrain, models, late effects and coronas. The synthetic run passed all 11
+phases. The live A30 fixture paused at the held view and completed all 132
+timed queues with zero missing samples. Each phase recorded the same 133
+main renderer draws and 88,452 indexed elements. Azahar's queue medians
+were identical across phases and do not rank native raster costs. The
+manual console launcher is in `build/performance-a30-world-pixel-passes/probe`.
+All emulator processes exited. The native comparison remains pending.
+
+The opt-in `--algo-chicago-neutral-draws candidate` omits a draw when its
+quantized fade or complete one-map bake guarantees zero source alpha for
+ordinary alpha blending, or zero source RGB for additive and subtractive
+blending. Chicago masks depth and framebuffer alpha writes. First-person
+stencil writers and stereo views retain their draws. The bake records a
+bitwise summary with its pixels and updates it whenever a slot is reused.
+
+The 400×240 Azahar fixture omitted seven of sixteen test draws and matched
+full RGBA and D24S8 in all sixteen cases. It covered zero versus nonzero
+fade, black and transparent colored texels, first-person stencil writes,
+and cache hits. The scripted A30 opening matched both buffers at tick
+301, with no omissions observed in its sampled windows. Native candidate
+builds are under `build/performance-a30-chicago-neutral`.
+
+A separate scripted route drew the authored A30 dropship tractor beam in
+both builds and recorded no eligible omissions in the sampled windows.
+Both runs baked 23,968 texels. The route stalled at its tenth terrain
+waypoint before the Marines encounter. The final tick 1381 color and
+depth/stencil buffers matched. This is evidence against prioritising
+whole-draw neutral rejection for the sampled approach. It does not measure
+native timing or cover the held Marines view. All emulator sessions exited.
+
+The CPU material combiner now evaluates only products consumed by a
+destination register or by that stage's selected sum/mux output. It reads
+inputs before publishing any destinations and keeps the AB, CD and SUM
+write order, component arithmetic and dot-product rules. The native A30
+capture recorded 15,574 bake-cache misses across the route.
+
+The linked ARM evaluator matched 4,848 reference/candidate outputs bit
+for bit, including 376 authored generic packets found across the 24 prepared
+maps and synthetic mux, dot and aliased-destination cases. The authored A30
+tractor-beam packet used 24.1% fewer evaluator instructions. This count
+covers the CPU combiner alone. Both Azahar A30 opening runs baked 4,816
+texels and matched all 96,000 RGBA words and 96,000 depth/stencil words at
+tick 301. The scripted run disabled sound for repeatability and ended
+before the dropship encounter. Both emulator processes exited. Paired
+fixed 400×240 console benchmarks are in `build/performance-generic-live-products`.
+Native frame timing is pending.
+
+The opt-in `--algo-chicago-map-uv candidate` changes the rigid and skinned
+Chicago model programs. A Boolean map count selects which original UV dot
+products execute. The transformed shaders export XY only, so they omit the
+unused ZW writes and still initialize every exported lane. One-, two-, and
+three-map draws execute four, two, and one fewer instructions respectively.
+One- and two-map draws also set four and two fewer float uniform vectors.
+The separate projective effect shader keeps its TEXCOORD0W export.
+
+The assembled comparison changed only those two shaders and verified the
+original arithmetic operands and output mapping. In Azahar, 16 paired
+400×240 captures matched full RGBA and D24S8, including all three map
+counts, same-frame transitions, a command-list split and first-person
+stencil. Both native benchmark builds and the receipts are in
+`build/performance-a30-chicago-map-uv`. `CHICAGO MAP PROFILE` reports draws
+and indexed elements by map count. The scripted A30 opening matched color
+and depth/stencil at tick 301, with sound disabled for repeatability. Both
+runs recorded 8,908 one-map and 238 two-map draws over the two matching
+120-frame gameplay windows. Indexed elements can reuse transformed vertices
+and are not an instruction count. All emulator runs exited. Native timing
+and the dropship view remain pending.
+
+The four-map animated A30 sky could cancel every attempted midpoint
+even with warm source textures. In a private Azahar run with the
+New 2DS XL renderer gate enabled and the admission deadline extended,
+43 rejected attempts reached the generic material-bake preflight.
+The midpoint now has up to four 8×8 RGBA8 scratch textures allocated at
+startup. A missing four-map sky bake uses the same material inputs and
+pixel calculation as the ordinary path. Scratch stays outside the
+regular bake cache and is reused after GPU acquisition. Missing sources
+or exhausted slots still discard the optional frame.
+
+The private A30 fixture captured a midpoint and keyframe at tick 295.
+The comparison build baked the sky through the ordinary cache at the
+same times. Camera records and all color and depth/stencil bytes matched
+for both views. The midpoint and keyframe themselves differed, confirming
+that the fixture captured two distinct views. The fixture disables audio
+for repeatable effects and extends admission only for capture. The native
+benchmark uses ordinary sound and deadlines. It is in
+`build/performance-a30-midpoint-sky`.
+
+An extended run reused the scratch across five acknowledged midpoints,
+with no further texture rejections. In the last 30-tick window it
+reported three midpoint acknowledgments and 27 busy skips. This run
+still used the extended fixture deadline. The new acquisition counters
+attribute all 27 skips to pending display acknowledgement, with zero
+queue acquisition failures.
+
+The opt-in swap-overlap candidate records a midpoint for the following
+refresh when the previous swap is already posted and the regular-frame
+budget still fits. Before submitting it requires display acknowledgement
+and checks the deadline again. A controlled-clock fixture exercised
+120,000 inputs for the ordinary and pending-swap paths. In the private
+extended-deadline A30 test, acknowledged midpoints increased from 3 to 30
+in the final 30 simulation ticks. Both builds acknowledged 30 regular
+frames. Elapsed window time grew from 1.05 to 1.42 seconds. The capture
+matched camera inputs, 400×240 RGBA and raw D24S8 for both frames at tick
+295. The extended deadline, model gate and disabled audio are fixture
+conditions. The production pair under `build/performance-a30-midpoint-swap-overlap`
+uses the real deadline. Native delivery and input latency remain to be measured.
+
+When the endpoint cameras match byte for byte, a single interpolation
+now supplies culling and rasterization. Host differential tests matched
+40,000 camera cases, including distinct views and disallowed transitions.
+The new midpoint budget report classifies skip reasons and cooldown
+triggers. A controlled-clock host fixture matched the old admission
+and deadline in 120,000 cases. Console timing remains pending.
+
+The `--algo-model-quaternion-direct candidate` path writes the lighting
+quaternion directly in the shared rigid and skinned model programs.
+It executes two fewer instructions for the normal case and one fewer
+for the original degenerate-normal fallback. The uploaded shader size,
+output mapping and arithmetic operands match the reference. Only the two
+target programs changed in the matched build. Azahar matched full
+400×240 color and depth/stencil in 32 model and 24 mixed-surface cases,
+including exact and near-degenerate normals. Paired console builds are
+in `build/performance-a30-model-quaternion`. Native GPU queue and display
+timings remain pending.
+
+The scripted A30 opening also matched full color and depth/stencil at
+tick 301. That private comparison disabled sound for repeatable effects.
+Two full campaign windows submitted about 130,000 indices per frame to
+the affected programs. Index counts include reused vertices and cannot
+be converted directly to executed shader instructions.
+
+The opt-in `--probe-neutral-model-tint` comparison bypasses two PICA
+combiner operations on lit, multipurpose model parts with white RGB tint.
+The original stages interpolate between white and white, then multiply
+the lit color by that white result. The candidate passes through the
+lit color and retains the later buffer writes for reflection and detail.
+Colored tint reinstalls its recipe on the next draw. Azahar runs
+configured for Vulkan and software matched full 400×240 color and raw
+depth/stencil across 18 pairs, including 144 bypassed parts, all detail-mask channels, alpha cutouts,
+decals, first-person stencil and command-list splits. The fixed-resolution
+probe alternates reference and candidate while holding the same paused
+view. Both runs completed all five probe phases with 12 samples per
+phase and bypasses confined to phases two and four. The binaries
+are in `build/performance-a30-neutral-model-tint`. Physical timings are
+pending.
+
+The same scripted A30 executable ran with the candidate enabled and
+disabled, using a private fixed-seed fixture with sound disabled for
+repeatable effects. Both runs recorded 64,536 model parts. The candidate
+bypassed 16,711 parts and matched all color and depth/stencil pixels at
+tick 295. The draw count is an eligibility measure. The GPU cost depends
+on coverage and how PICA handles passthrough stages.
+
+Prepared views can now move frustum construction, portal visibility
+and ordered object discovery ahead of GPU acquisition during ordinary
+mono campaign frames. The old admission required a submitted midpoint.
+The record is owned by the main thread and checked again against the
+map generation, BSP, tick and previous leaf after acquisition. Texture
+maintenance and GPU arena reuse retain their fences. Paused and debug
+views use the ordinary late path. In the existing native A30 capture,
+nearby object discovery averaged about 0.21 ms per frame across the
+median profiling window, so this is a bounded CPU overlap opportunity.
+Matched 30 Hz and 60 Hz pairs are in
+`build/performance-a30-prepared-regular` and
+`build/performance-a30-prepared-present60`.
+
+The 30 Hz Azahar verifier matched the reference frusta, ordered clusters
+and ordered objects in 295 admitted A30 views. A final frame with live
+audio matched depth and stencil, while 16,409 of 96,000 color pixels
+differed on the first candidate run. A second candidate run produced a
+different color result. Disabling early preparation in the candidate
+binary reproduced the reference byte for byte. Running early preparation
+and drawing from the late results still changed color. Inserting a 1 ms
+delay before acquisition with early preparation disabled also changed
+color and effect triangle counts. Water geometry, textures, projection,
+tint and wave inputs matched across the two instrumented runs. The sound
+manager schedules work using elapsed time and draws from the local random
+stream used by particles. Disabling sound in the private fixture before
+seeding the campaign produced byte-identical color and depth/stencil at
+tick 295 in the reference, candidate and 1 ms timing control, with
+28,038 effect triangles across the route in each run.
+The console builds use ordinary audio. The matched emulator frame
+covers one point in the route and physical timings are pending.
+
+The separate `--algo-model-view-pack candidate` shortens the shared
+rigid and skinned reflect programs by one instruction. The assembled
+output map continues to export the original XYZ view vector. The
+fourth register lane carries no rasterizer semantic. Both lit and
+reflective draws use these programs in A30. The paired builds retain
+the previous shader and command options. All 56 model and mixed surface
+cases matched color and depth/stencil, with seven discarded midpoint
+submissions per build. The scripted A30 frame at tick 301 also matched
+the prior water candidate. A full early gameplay queue window recorded
+about 131,000 affected indices per frame. Native timing remains pending.
+The paired builds are in `build/performance-a30-model-view-pack`.
+
+The basic rigid and skin programs have an independent
+`--algo-model-uv-pack candidate`. Texture units zero and one receive
+the original UV products through separate lanes of one PICA output
+register. Both programs lose three instructions and one output register.
+The assembled regression test checks the libctru output semantics,
+including the retained zero UV for unit two. All 32 Azahar cases matched
+color and depth/stencil exactly across rigid, skinned, sky, cutout,
+decal and cloak draws. The benchmark logs these programs' submitted
+indices separately from the lit programs. Native timing remains pending.
+The early scripted A30 run matched color and depth at tick 301 and
+recorded zero basic shader indices in its full queue windows. This
+candidate does not address that workload. Both builds are in
+`build/performance-a30-model-uv-pack`.
+
+The matched Boolean selector builds keep the UV and command suite
+candidates enabled. Replacing the float comparisons with draw-level
+Boolean uniforms reduces assembled model reflect and water programs by
+two instructions each and the glass program by six. A third build
+adds the water base branch. The multiply pass reaches the shader end
+in eleven instructions, including the jump and output writes. The
+reflection pass retains its existing calculation and pays for one
+additional branch.
+
+The three builds matched 32 model and 24 mixed surface captures byte
+for byte in full-resolution color and depth/stencil on Azahar. The
+surface fixture alternates waves, glass poses and material passes,
+splits command lists, and rejects seven recorded midpoints per build.
+The previous framebuffer remains intact on each rejection. The
+benchmarks report recorded water and glass indices separately from
+the model work. At tick 301 of the scripted A30 run, the combined
+candidate matched the prior UV-only build's full color and depth/stencil.
+The run exercised two-pass BSP water with GPU waves and logged 73,440
+water indices and 23,040 glass indices in each 120-frame gameplay window.
+Native timing remains pending. The A30 pair and water candidate are in
+`build/performance-a30-boolean-selectors` and `build/performance-a30-water-base`.
+
+The `--algo-uv-outputs candidate` benchmark removes one instruction
+from each of the four rigid and skinned lit/reflect PICA programs. Only
+those four generated shader binaries differ. The dedicated
+lit programs were selected explicitly in the validation fixture, while
+normal play uses the shared reflect programs for both lit and reflective
+materials. Azahar matched full 400×240 RGBA8 and D24S8 buffers across 32
+cases, including two-bone transforms, independent detail UV scales,
+reflections, alpha test and decals. The paired console binaries use the
+same 60 Hz presentation and graphics command suite. `MODEL UV WORK`
+counts indices recorded on the affected paths per GPU queue window.
+Index reuse and discarded midpoint work prevent converting that count
+directly to executed instructions. Two early A30 gameplay windows each
+recorded about 130,000 affected indices per frame in both Azahar runs.
+The complete RGBA8 and D24S8 captures at tick 301 matched. The emulator
+reported a New 3DS XL. Native New 2DS XL timing and midpoint behavior are
+pending. The pair is in `build/performance-a30-uv-outputs`.
+
+Each radar history slot now computes its yaw sine and cosine on its first
+drawn contact and reuses them for subsequent contacts in that slot. A
+2 KiB cache reuses the distance exponent result for identical positive
+normal float inputs. The ARM fixture checked cold and repeated lookups
+against the original `pow` expression. The scripted 120-frame A30 runs
+produced identical packets for all 1,025 contacts, including positions,
+sizes, colors and the final composite parameters. Those contacts shared
+one position in this route, so the observed 1,024 hits and one miss do
+not establish a hit rate for the full encounter. The 400×240 A30 and 60 Hz
+builds are in `build/performance-radar-distance`.
+
+The radar now precomputes ten contact history fade/radius pairs during
+initialization. The original expressions and contact drawing order are
+preserved. The ARM object no longer calls `pow` in
+`motion_sensor_draw_screen`. Per-contact distance mapping still uses its
+original arithmetic. Azahar matched the runtime ARM formula at every
+history age and completed the scripted A30 smoke run with 120 radar
+frames, 1,025 contacts and 107 contact draws. Updated A30 and 60 Hz builds are in
+`build/performance-radar-history`.
+
+The opt-in `--probe-radar-inline-clear` compares the radar's separate GX
+fill with a zero-RGBA overwrite within the PICA draw list. The latter
+uses immediate vertices and keeps the existing framebuffer flush and
+invalidate on target change. It removes one command-list split and one
+GX fill in exchange for a draw of the square radar target. In 24 Azahar
+pairs at 16, 32 and 64 pixels, the radar and both LCD buffers matched
+byte for byte, including target contents seeded with nonzero color and
+alpha. The probe sampled all five phases and confirmed one fill per
+reference and one in-list clear per candidate frame. The native queue
+trade-off still needs measuring. The probe is in
+`build/performance-radar-inline-clear/probe`.
+
+The motion tracker now submits one draw for each adjacent run of contacts
+using the same texture. The original contact order, per-contact vertices,
+blend, sweep and mask are preserved. A native-size Azahar fixture matched
+every byte of the offscreen radar and final top framebuffer across 24
+pairs at 16, 32 and 64 pixels. The workload covered overlapping contacts,
+empty frames, alternating textures, and runs of up to 128 contacts.
+Contact submissions fell from 795 to 168 and the measured command span
+fell from 44,224 to 21,636 words. Actual contact runs and frame-time
+effects depend on gameplay. An isolated Azahar A30 campaign run submitted
+1,025 contacts in 107 draws across 120 radar frames and exited normally.
+Azahar reported a New 3DS XL and did not cover New 2DS XL midpoint timing.
+Fixed 400×240 A30 and 60 Hz candidate builds are in
+`build/performance-radar-contact-batch`.
+
+The touch HUD batches the lower controls and Reload into one mono draw
+and limits the lower strip to its populated atlas bounds. At native
+320×240, this removes 2,112 transparent pixels from the lower strip's
+raster area per draw. A full bottom-target fixture matched every RGBA8
+pixel across eight atlas revisions, including the per-quad fallback.
+The 400×240 A30 build is in `build/performance-touch-panel-crop/candidate`.
+
+The separate `--probe-pixel-passes` launcher alternates the full paused
+view with a one-pixel scissor on the 3D scene, later effects, top overlays,
+and bottom LCD in turn. Geometry, clears, transfers and render order
+remain in the queue. The queue deltas measure sensitivity to coverage
+within each selected group, including effects on later draws that consume
+the same depth or color buffers. They do not add up to independent pass
+times. The Azahar fixture completed all nine phases with 12 queue samples
+each. Its captures changed only the expected rectangle on the expected
+target, including after a command-list split and offscreen target return.
+The native probe is in `build/performance-a30-pixel-passes/probe`.
+
+The matched `--a30-benchmark --present-60 --performance-profile` builds
+in `build/performance-a30-present60-command-suite` compare the combined
+vertex, TEV, effect, shader and uniform command reductions against the
+stock command paths. Both request native 400×240 on New 2DS XL. Azahar
+matched all 16 synthetic RGBA8 captures byte for byte. Each case rejected
+a recorded midpoint before the next visible frame, with command-list
+splits in eight cases. The candidate exercised all five paths, including
+96 skipped uniform vectors. Both emulator sessions exited. Native frame
+pacing and the cost of the combined paths remain to be measured.
+
+The opt-in `--compact-uniform-uploads` A30 build skips whole runs of
+vertex uniforms that match the current command list bit for bit. It scans
+four clean dirty flags at a time. Float24 constants keep their SDK
+uploads and invalidate the affected shadow entries. Integer and Boolean
+values, restore flags, and geometry shader uniforms follow SDK behavior.
+Frame acquisition, list splits and rewinds discard the shadow.
+
+The linked ARM fixture matched uniform RAM and restore flags across
+6,000 mixed sequences plus dense and boundary cases. A repeated matrix
+used zero command words instead of 20 and 569 instructions instead of
+933. The mixed fixture used 8.1% fewer words and 16.5% fewer instructions.
+Azahar matched all 16 captures byte for byte while skipping 192 vector
+uploads. Both emulator sessions exited. The fixed 400×240 builds are in
+`build/performance-a30-uniform-uploads`. Native scene hit rates and frame
+times remain pending.
+
+The opt-in `--compact-shader-uploads` A30 build retains the vertex code
+already uploaded in the current command list. Chicago draws restore the
+world program as pending state. When the next draw selects Chicago again
+before any world draw, Citro3D can request a duplicate upload. The wrapper
+skips only that upload and still runs the SDK's entry-point and output-map
+configuration. Geometry shader configurations take the stock path. The
+shadow is invalidated on frame begin, command-list splits and rewinds.
+
+The linked ARM fixture matched code RAM, operand descriptors and other
+configuration writes across 6,000 bind sequences. One repeated Chicago
+transition used 52 command words instead of 82. The mixed fixture used
+4,347 uploads instead of 5,166, with an instruction reduction of about
+0.35% across context updates. Azahar matched all 16 captures while
+skipping 48 uploads. Both sessions exited cleanly. Physical A30 timing
+and the actual upload hit rate are pending. The matched benchmarks are in
+`build/performance-a30-shader-uploads`.
+
+The opt-in `--probe-texture-rebinds` build checks whether a pending Citro3D
+texture bind matches the immutable 2D texture and sampler already recorded
+in the current command list. It drops only matching dirty bits. The SDK
+still handles changed descriptors, explicit texture status, framebuffer
+transitions and any draw with a mutable or unrecognised bound texture.
+When all pending bits match, the stock texture-cache clear is also
+unnecessary. The probe reports eligible rebinds, skipped rebinds and skipped
+clears in five alternating phases.
+
+In 12,000 linked ARM updates, the final texture registers matched. The
+synthetic stream went from 262,968 to 96,666 command words and from 11,568
+to 5,847 cache-clear commands. Azahar matched all 16 image comparisons
+while actually skipping 16 clears. The emulator exited cleanly. The
+actual rebind frequency and queue timing on PICA remain to be measured.
+The probe and instructions are in `build/performance-a30-texture-rebinds`.
+
+The opt-in `--compact-effect-commands` A30 build reduces Citro3D's
+depth, stencil, cull and blend state packets. It writes the complete
+34-word SDK packet at a list boundary and skips ordinary register
+groups that already match the recorded state. Gas, shadow and early-depth
+writes keep the stock order. The linked ARM comparison matched all
+18 affected registers in 12,000 context updates, including masked fields,
+stencil changes, command-list splits and rewinds. The fixture used
+210,922 command words versus 408,000 and 18.33 million instructions
+versus 25.82 million. An Azahar/Vulkan fixture elided 1,680 words and
+matched all 16 RGBA8 captures byte for byte. Both emulator sessions
+exited. Both fixed 400×240 benchmarks are in
+`build/performance-a30-effect-commands`. Console queue and frame timings
+are pending.
+
+The opt-in `--compact-tev-commands` A30 build tracks the five register words
+per Citro3D combiner stage within the current command list. It skips an
+identical stage and writes the SDK's six-word packet for a new stage. List
+splits, rewinds and frame acquisition invalidate the shadow. A linked ARM
+fixture ran 12,000 mixed context updates and checked all 30 stage registers
+after each one. The mixed workload went from 325,218 to 129,918 combiner
+command words and from 22.67 to 20.96 million ARM instructions in context
+updates. An Azahar/Vulkan fixture that forced repeated stage setup elided
+288 packets and matched all pixels across 16 reference and candidate
+captures. Both emulator sessions exited. Actual scene hit rates, PICA
+timing and frame pacing need a console comparison. Both fixed 400×240
+benchmarks are in `build/performance-a30-tev-commands`.
+
+The paused GPU probes now report the mean time from GX submission to the
+last P3D command-list interrupt and from that interrupt to queue completion.
+The second interval can include outstanding transfers, clears and callback
+latency. The first can include work that overlaps the command lists. The
+split is available only when the observed P3D count matches the number of
+submitted command lists before the queue callback. The total queue samples
+remain available when the split is missing. libctru invokes its queue
+handler before the event callback, so a P3D that ends a queue arrives too
+late for that split. Cumulative counts preserve attribution if the next
+submission starts before that callback. [Pinned libctru event dispatch](https://github.com/devkitPro/libctru/blob/36fe1ada5b7ebe53ba4decda36d764a55f8fefb6/libctru/source/services/gspgpu.c#L374-L391)
+
+The host fixture passed delayed final interrupts, multiple command lists,
+transfer-only queues, clock wrap and unavailable samples. The Azahar/Vulkan
+fixture completed 64 submissions, attributed 48 to P3D and passed the
+sixteen alpha image comparisons. Console timing is pending.
+
+An earlier paused capture at tick 1222 had a normal queue median around
+79.8 ms, a 28.1 ms quarter-pixel median and a 79.3 ms median with the
+particle draw path skipped. That establishes a strong sensitivity to pixel
+coverage for that view. The draw and transfer split can show whether the
+later dropship view spends a similar share of its queue before the final
+command list finishes. The probe builds are in
+`build/performance-a30-queue-breakdown`.
+
+Synchronized frame acquisition now waits for VBlank once, then retries the
+nonblocking GX queue acquisition. Citro3D's SYNCDRAW flag waits before it
+checks queue readiness, so retrying with the flag could wait through an
+extra refresh even after GPU work had finished. The mission's regular
+frame already bypasses VBlank synchronization. Its held A30 capture at
+time 1376 spent roughly 38.8 ms waiting for the queue, with around 0.08 ms
+of other frame preparation. That wait reflects work in the previous
+submission. The synchronized-path fix does not account for it.
+
+A host timing fixture ran 40 cases against the extracted acquisition
+loops, including pending and retired queues, midpoint rejection and the
+queue watchdog. With a modelled 39 ms queue, synchronized acquisition
+changed from 50.142 ms with three VBlank waits to 39.214 ms with one.
+Console timing is pending. Builds and the fixture are under
+`build/performance-frame-sync-once`.
+
+The A30 capture includes a held view at mission time 1376 with simulation
+around 0.06 ms and GPU queues averaging 38.9–39.5 ms across successive
+120-frame windows. It is a useful view for isolating rendering cost. The
+first tractor-beam report is earlier, and the held view has large effects
+and active coronas, so the queue timings cannot be assigned to the beam.
+
+The independent `--probe-effect-alpha-zero` build alternates standard
+alpha-blended particle draws with and without a PICA alpha test of greater
+than zero. The source and destination RGB factors make a final alpha of
+zero an identity operation. This draw path masks alpha and depth writes
+and keeps stencil. Other blend functions and separate transparent paths
+are outside the experiment. The probe reports eligible and tested draws,
+keeps the same geometry, and times five phases of the same paused view.
+The separate validation launcher compares all 96,000 RGBA8 pixels for
+sixteen synthetic cases with nearest and linear sampling, float and
+indexed packed vertices, depth testing on and off, and world and weapon
+pass setup. The fixture uses cleared depth and stencil and does not measure
+their raw contents. All sixteen comparisons passed on Azahar/Vulkan, and
+the emulator exited. The probe and validation binaries are under
+`build/performance-a30-effect-alpha-zero`. Hardware image comparisons and
+queue timings are pending.
+
+The newer SD capture at `build/sd-logs/20261108T153539` is the fixed 400×240
+A30 launcher at 804 MHz with L2 enabled, original 30 Hz pacing and the 64-pixel
+texture cap selected for that map load. It reports 609 slow map reads. The
+maximum map-lock wait was 0.004 ms. Among the reported reads, the median I/O
+time was 33.84 ms during four checkpoint write windows and 17.48 ms outside
+them. The slow-read logger has an 8 ms threshold, and save windows coincide
+with changing gameplay, so this is an association. Seventeen of 68 logged
+frame hitches fell in those windows. The 4 MiB gameplay cache logged 26 demand
+evictions and 792 maintenance evictions, with zero admission allocation
+failures or headroom pressure. The lowest sampled free linear memory was
+11.10 MiB. GPU queue windows after the first tractor-beam report reached
+27.59–39.51 ms on average in the moving scene.
+
+The checkpoint worker now reuses a single optional 16 KiB stdio buffer across
+the temporary save and validation of the prior save. It preserves the encoded
+bytes, CRC validation, backup rotation and the fallback to default buffering.
+The production file adapter passed host sanitizers and the linked ARM newlib
+fixture with identical bytes, header backpatch, EOF and flush failure. Across
+105 mock blocks the ARM fixture reduced backing writes from 177 to 26 and
+reads from 240 to 25. SD service timings and concurrent stalls remain to be
+measured on hardware. The matched fixed 400×240 profile builds are in
+`build/performance-a30-memory-grant/cache4` (reference) and
+`build/performance-a30-checkpoint-buffer/cache4` (candidate).
+
+The earlier A30 capture reports a 124 MiB application region and about 20 MiB
+of free linear memory after map load. The reported zero uncommitted region
+bytes do not measure free space within either allocated heap. We have no
+linear free-space sample at the largest hitch. The older benchmark links a
+libctru allocator that caps the default linear arena at 32 MiB and puts the
+rest in the ordinary heap. A Dev1 launch can then request more than the
+kernel's 96 MiB ordinary-heap mapping limit before Halo starts. The dedicated
+Dev1 benchmark uses the upstream heap-clamp fix, which redirects the excess
+to the automatically sized linear heap. The gameplay texture cache retains
+its own 4 MiB default budget and 256-slot limit under both grants.
+[libctru heap-clamp fix](https://github.com/devkitPro/libctru/commit/5290d64375002802f3e5ea8bfc31ea33ec64456d)
+
+At the held dropship view (simulation tick 1376), the same native capture
+recorded 38.91 ms average GPU queue time and 14.33 ms average CPU preparation.
+The cache held 3.75 MiB across 190 slots with zero demand or maintenance
+evictions and zero allocation failures across the repeated held samples.
+The top screen refresh interval was about 16.7 ms. A larger application
+grant could help with assets or checkpoint allocations elsewhere in the
+route. The held view already had a warm working set.
+
+Two fixed 400×240 A30 builds in `build/performance-a30-memory-grant` vary only
+the configured texture cache budget (4 or 8 MiB). Both log the application
+region, process commit limit and heap capacities at startup. Compare the two
+under the normal grant to measure the cache budget effect. To measure the
+grant effect, use `build/performance-a30-dev1/cache4` for both grants. Match
+the route, settings and CPU clock, then compare texture churn, read stalls,
+checkpoint overlap and render time. The build and mocked startup allocator
+passed, and a scripted Azahar A30 run passed with the normal process commit
+limit. A Dev1 console boot and paired timing are pending.
+
+Repeated native lighting draws now skip the ambient, distant and backlight
+component checks when their copied input bytes and translucency match. The
+renderer still binds the Citro3D environment, so switches and frame resets
+restore the same dirty state. A linked ARM fixture kept the same SDK state
+and PICA command words across 12,000 mixed draws. In the isolated fixture,
+an identical-input bind fell from 321 to 235 instructions. A translucency
+change rose from 461 to 477. The regular native build passed. The earlier
+A30 capture counted 614,384 lit draws, but the new key's hit rate and
+frame-time effect still need a physical run.
+
+Native model lighting now keys its conversion cache on the 64-byte ambient
+and distant-light prefix rather than the entire 116-byte lighting packet.
+Reflection tint, point lights and shadow data still reach their own
+consumers. The linked ARM comparison matched all output bytes and floating
+point control bits across 12,000 mixed packets. It counted 369 to 226
+instructions for an identical packet and 766 to 226 for a reflection-only
+change. Synthetic exceptional float inputs can leave different cumulative
+exception flags when the candidate skips a repeated conversion. Native
+rendering does not consume those flags. Physical timing is pending.
+
 The New 2DS XL A30 run completed all five texture-unit probe phases with
 matching draw and element counts. The two candidate comparisons changed
 median queue time by −0.04% and +0.24% relative to adjacent reference phases.
@@ -213,15 +1063,13 @@ are retained privately under `build/performance-goal`.
 
 ## Review coverage and next work
 
-The saved `build/performance-goal/review-coverage.json` tracks the audit gap.
-An earlier snapshot inventoried 988 code files (453,955 lines),
-excluding build outputs, dependencies, documentation and configuration files.
-Exact scopes with matching source hashes establish 118 whole files and parts
-of 51 others (28,059 lines); 819 files have no credited current scope. Vague
-scopes and changed hashes receive no credit. This is conservative accounting
-of retained receipts, not a claim that all other code was never inspected,
-and line coverage is not proof of correctness. A complete code review remains
-substantial unfinished work.
+The saved `build/performance-goal/review-coverage.json` tracks hash-backed
+review scopes. The current snapshot inventories 999 code files and 458,523
+lines, excluding build outputs, dependencies, documentation and configuration.
+Retained receipts establish whole-file scopes for 206 files and partial scopes
+for 78 files, covering 49,535 lines. Another 715 files lack a matching scope
+in those receipts. The accounting requires a matching source hash and precise
+line scope. The complete code review and runtime validation remain open.
 
 The additional `ai-actions-review.json` covers complete alert, guard and hunter
 action files. Guard's expensive position selection is already conditionally

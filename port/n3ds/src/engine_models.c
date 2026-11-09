@@ -9,6 +9,7 @@
 #include "tag_files/tag_groups.h"
 #include "engine_models.h"
 #include "engine_model_palette.h"
+#include "engine_model_clip_bounds.h"
 #include "engine_chicago.h"
 #include "engine_dynamic_geometry.h"
 #include "engine_cache.h"
@@ -74,13 +75,18 @@ static struct native_model_lighting native_lighting;
 static float lighting_channel(float value) {return isfinite(value)?PIN(value,0.f,1.f):0;}
 static void model_lighting_prepare(void)
 {
-    static struct render_lighting previous;
+    /* Model lighting uses the ambient and distant lights at the head of the
+     * packet. Reflection tint and other lighting fields remain available to
+     * their own consumers without forcing another native-light conversion. */
+    enum { lighting_bytes=offsetof(struct render_lighting,point_light_count) };
+    static _Alignas(struct render_lighting) byte previous[lighting_bytes];
     static float previous_debug;
     static int valid;
     float debug=rasterizer_debug_options.model_lighting_ambient;
     /* Compare values: deferred packets and reused packet storage are safe. */
-    if(valid && previous_debug==debug && !memcmp(&previous,&parameters.lighting,sizeof(previous))) return;
-    previous=parameters.lighting;previous_debug=debug;valid=1;
+    if(valid && previous_debug==debug && !memcmp(previous,&parameters.lighting,sizeof(previous))) return;
+    memcpy(previous,&parameters.lighting,sizeof(previous));
+    previous_debug=debug;valid=1;
     memset(&native_lighting,0,sizeof(native_lighting));
     for(int c=0;c<3;++c) native_lighting.ambient[c]=lighting_channel(parameters.lighting.ambient_color.n[c]);
     native_lighting.count=PIN(parameters.lighting.distant_light_count,0,2);
@@ -359,6 +365,10 @@ static struct decoded_stream {
     int immutable;
     unsigned int count,bytes,local_bytes;
     int valid;
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+    struct n3ds_model_clip_box clip_boxes[NATIVE_GPU_MODEL_BONES];
+    unsigned int clip_mask;
+#endif
     struct cached_pose poses[STREAM_POSES];
 } decoded_streams[DECODE_STREAMS];
 static struct decoded_stream *decoded_hints[512],*last_decoded;
@@ -631,9 +641,16 @@ static const struct model_vertex_uncompressed *decode_stream(const void *data,un
             s->local_bytes=local_bytes;s->bytes+=local_bytes;decoded_bytes+=local_bytes;
         }
     }
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+    s->clip_mask=0;
+    int clip_valid=immutable;
+#endif
     if(s->gpu_nodes && s->rigid_node>=0) for(unsigned int i=0;i<count;++i) {
         const struct model_vertex_uncompressed *v=s->vertices+i;
         memcpy(s->local[i].position,&v->position,12);memcpy(s->local[i].color,&v->normal,12);memcpy(s->local[i].uv,&v->texcoord,8);
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+        if(clip_valid) n3ds_model_clip_include(s->clip_boxes,&s->clip_mask,0,v->position.n);
+#endif
     }
     else if(s->gpu_nodes) for(unsigned int i=0;i<count;++i) {
         const struct model_vertex_uncompressed *v=s->vertices+i;
@@ -641,6 +658,20 @@ static const struct model_vertex_uncompressed *decode_stream(const void *data,un
         memcpy(out->position,&v->position,12);memcpy(out->normal,&v->normal,12);memcpy(out->uv,&v->texcoord,8);
         n3ds_skin_vertex_set_bones(out,v->node_weights[0]?remap[v->nodes[0]]*3:0,
             v->node_weights[1]?remap[v->nodes[1]]*3:0,v->node_weights[0],v->node_weights[1]);
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+        if(clip_valid) {
+            float w0=v->node_weights[0],w1=v->node_weights[1];
+            if(!(w0>=0.f && w1>=0.f && fabsf(w0+w1-1.f)<=.00001f)) clip_valid=0;
+            else {
+                unsigned int first=w0?remap[v->nodes[0]]:0;
+                n3ds_model_clip_include(s->clip_boxes+first,&s->clip_mask,first,v->position.n);
+                if(w1) {
+                    unsigned int second=remap[v->nodes[1]];
+                    n3ds_model_clip_include(s->clip_boxes+second,&s->clip_mask,second,v->position.n);
+                }
+            }
+        }
+#endif
 #if HALO_N3DS_ALGO_STABLE_PALETTE == N3DS_ALGORITHM_VERIFY
         float influences[4];
         n3ds_skin_vertex_read_bones(out,influences);
@@ -652,6 +683,9 @@ static const struct model_vertex_uncompressed *decode_stream(const void *data,un
         }
 #endif
     }
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+    if(!clip_valid) s->clip_mask=0;
+#endif
     if(s->gpu_nodes && s->rigid_node<0) {
         n3ds_algorithm_profile_add(N3DS_ALGORITHM_GPU_WEIGHTED_VERTICES,count);
         n3ds_algorithm_profile_add(N3DS_ALGORITHM_GPU_WEIGHTED_STREAM_BYTES,local_bytes);
@@ -1224,6 +1258,10 @@ static struct cached_indices {
     const void *source;unsigned short *list;unsigned int triangles,vertices,count;short type;
     const unsigned short *uploaded,*resident;
     unsigned long long uploaded_frame,resident_epoch;
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+    const unsigned char *resident_byte;
+    unsigned long long resident_byte_epoch;
+#endif
 } index_cache[INDEX_SLOTS];
 static unsigned int index_cache_bytes,index_cache_next;
 static struct cached_indices *index_hints[512];
@@ -1253,6 +1291,24 @@ static const unsigned short *index_upload(struct cached_indices *p,int allow_res
     }
     return p->uploaded?p->uploaded:p->list;
 }
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+static const unsigned char *index_resident_byte(struct cached_indices *owner,const unsigned short *list,
+    unsigned int count)
+{
+    if(!owner || owner->list!=list || owner->count!=count || count>32*1024/sizeof(*list)) return NULL;
+    unsigned long long epoch=n3ds_gpu_index_residency_epoch();
+    if(!epoch) return NULL;
+    if(owner->resident_byte_epoch!=epoch) {
+        unsigned long long frame=n3ds_gpu_model_frame_serial();
+        /* The first frame uses the ordinary upload. Try packing on repeat
+         * use, once per epoch, even if the source indices exceed a byte. */
+        if(!owner->uploaded_frame || frame-owner->uploaded_frame!=1) return NULL;
+        owner->resident_byte=n3ds_gpu_indices_upload_resident_byte(list,count);
+        owner->resident_byte_epoch=epoch;
+    }
+    return owner->resident_byte;
+}
+#endif
 static const unsigned short *static_indices_prepare(short type,const unsigned short *source,unsigned int triangles,
     unsigned int vertices,long *count,struct cached_indices **owner)
 {
@@ -1502,6 +1558,27 @@ void _rasterizer_model_draw(struct shader *shader, short permutation,
     const struct vertex_buffer *vertices, long dynamic_vertices);
 #include "engine_model_merge.inl"
 #include "engine_scenery_mesh.inl"
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+static unsigned int model_clip_checks,model_clip_draws,model_clip_triangles;
+
+static int model_clip_reject(const struct n3ds_model_clip_box *boxes,unsigned int bones,
+    const float *rows,unsigned int elements,int shared_box)
+{
+    if(!bones || elements<96 || !n3ds_gpu_frame_is_mono() || n3ds_presentation_midpoint_active()) return 0;
+    const struct n3ds_model_clip_view *view=n3ds_gpu_model_clip_view();
+    unsigned int planes=15;
+    ++model_clip_checks;
+    while(bones && planes) {
+        unsigned int bone=__builtin_ctz(bones);
+        bones&=bones-1;
+        planes=n3ds_model_clip_outside(view,boxes+(shared_box?0:bone),rows+bone*12,planes);
+    }
+    if(!planes) return 0;
+    ++model_clip_draws;
+    model_clip_triangles+=elements/3;
+    return 1;
+}
+#endif
 #include "engine_scenery_batch.inl"
 #include "engine_model_compact.inl"
 void _rasterizer_model_draw(struct shader *shader, short permutation,
@@ -1700,6 +1777,11 @@ void _rasterizer_model_draw(struct shader *shader, short permutation,
            scenery_batch_add(data,scenery_index_key,(const void *)rigid->local,count,draw_indices,index_count,rows,uv_scale.n,two_sided,&native_material)) {
             ++counters.parts;counters.triangles+=index_count/3;return;
         }
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+        if(dynamic_vertices==NONE && dynamic_triangles==NONE && rigid->immutable && !sky && !decal &&
+           !first_person_active && !(parameters.geometry_flags&(1u<<7)) && !parameters.effect.type &&
+           model_clip_reject(rigid->clip_boxes,rigid->clip_mask,rows,index_count,0)) return;
+#endif
         const struct model_compact_mesh *compact=NULL;
         if(dynamic_vertices==NONE && dynamic_triangles==NONE && rigid->immutable && !sky && !decal &&
            !first_person_active && !(parameters.geometry_flags&((1u<<7)|(1u<<18))) && !parameters.effect.type)
@@ -1712,10 +1794,25 @@ void _rasterizer_model_draw(struct shader *shader, short permutation,
             drew=n3ds_gpu_model_compact_draw_resident(compact->vertices,compact->indices,index_count,
                 rows,nodes,uv_scale.n,two_sided,rigid->rigid_node<0,&native_material);
         } else {
-            draw_indices=model_indices_submit(draw_indices,index_count,index_owner,dynamic_vertices==NONE);
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+            const unsigned char *bytes=NULL;
+            if(dynamic_vertices==NONE && dynamic_triangles==NONE && rigid->immutable && !sky && !decal &&
+               !first_person_active && !(parameters.geometry_flags&(1u<<7)) && !parameters.effect.type &&
+               !n3ds_presentation_midpoint_active())
+                bytes=index_resident_byte(index_owner,draw_indices,index_count);
+            if(!bytes)
+#endif
+                draw_indices=model_indices_submit(draw_indices,index_count,index_owner,dynamic_vertices==NONE);
             gpu=gpu_stream_upload(rigid);assert(gpu);
-            if(rigid->rigid_node>=0) drew=n3ds_gpu_model_rigid_draw(gpu,draw_indices,index_count,rows,uv_scale.n,sky,decal,two_sided,&native_material);
-            else drew=n3ds_gpu_model_skin_draw((const void *)gpu,draw_indices,index_count,rows,nodes,uv_scale.n,sky,decal,two_sided,&native_material);
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+            if(bytes) drew=n3ds_gpu_model_draw_resident_byte(gpu,bytes,index_count,rows,nodes,uv_scale.n,
+                two_sided,rigid->rigid_node<0,&native_material);
+            else
+#endif
+            {
+                if(rigid->rigid_node>=0) drew=n3ds_gpu_model_rigid_draw(gpu,draw_indices,index_count,rows,uv_scale.n,sky,decal,two_sided,&native_material);
+                else drew=n3ds_gpu_model_skin_draw((const void *)gpu,draw_indices,index_count,rows,nodes,uv_scale.n,sky,decal,two_sided,&native_material);
+            }
         }
         assert(drew);
 #ifdef HALO_N3DS_RENDERER_TESTS

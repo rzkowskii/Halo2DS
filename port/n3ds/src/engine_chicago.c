@@ -255,7 +255,7 @@ void n3ds_chicago_model_draw(const struct shader *shader,short permutation,
             }
         }
         for(int a=0;a<2;++a) if(bounds[a+2]-bounds[a]<.0001f) bounds[a+2]=bounds[a]+.0001f;
-        if(!n3ds_gpu_generic_bake_preflight(&bake,bounds,0)) return;
+        if(!n3ds_gpu_generic_bake_preflight(&bake,bounds,0,native.sky)) return;
         bounds_prepared=1;
     }
 #endif
@@ -293,7 +293,7 @@ void n3ds_chicago_model_draw(const struct shader *shader,short permutation,
     }
     if(four) {
         for(int axis=0;axis<2;++axis) if(bounds[axis+2]-bounds[axis]<.0001f) bounds[axis+2]=bounds[axis]+.0001f;
-        void *texture=n3ds_gpu_generic_bake(&bake,bounds);
+        void *texture=n3ds_gpu_chicago_bake(&bake,bounds,native.sky);
         if(!texture && n3ds_presentation_midpoint_rejected()) return;
         assert(texture);
         for(i=0;i<count;++i) for(int axis=0;axis<2;++axis)

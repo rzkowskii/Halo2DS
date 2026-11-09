@@ -254,7 +254,8 @@ void n3ds_trace_begin_loop(unsigned int loop, long tick, unsigned int generation
     current.loop = loop; current.generation = generation; current.bsp = bsp;
     current.kind = 0; current.attempt = current.view = current.submission = current.job = 0;
     n3ds_trace_tick(tick);
-    if (initialized && !started && gameplay) {
+    if (initialized && !started && gameplay &&
+        (!HALO_N3DS_DEPENDENCY_TRACE_START_TICK || tick >= HALO_N3DS_DEPENDENCY_TRACE_START_TICK)) {
         started = 1; run_id = start_tick = clock_now();
         start_pending = load32(&queue_write) - load32(&queue_read);
         store32(&capture_active, 1);
@@ -282,6 +283,94 @@ void n3ds_trace_end_loop(void)
 }
 void n3ds_trace_stop(void) { capture_stop(2); }
 
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+struct trace_latency {
+    uint64_t total, min, max;
+    unsigned int samples;
+};
+
+static void observe_latency(struct trace_latency *latency, uint64_t duration)
+{
+    if (!latency->samples || duration < latency->min) latency->min = duration;
+    if (duration > latency->max) latency->max = duration;
+    latency->total += duration;
+    ++latency->samples;
+}
+
+static void report_latency(const char *name, unsigned int kind, const struct trace_latency *latency)
+{
+    if (!latency->samples) return;
+    const double ms = 1000.0 / SYSCLOCK_ARM11;
+    char message[224];
+    snprintf(message, sizeof(message),
+        "DEPENDENCY TRACE LATENCY: edge=%s kind=%s samples=%u min_ms=%.3f mean_ms=%.3f max_ms=%.3f",
+        name, kind == 2 ? "midpoint" : kind == 1 ? "regular" : "other",
+        latency->samples, latency->min * ms, latency->total * ms / latency->samples, latency->max * ms);
+    n3ds_log(message);
+}
+
+static void report_capture(void)
+{
+    /* The journal retains owner submissions before the matching callback is
+     * drained. Check identities explicitly so an incomplete tail is excluded. */
+    struct trace_mark { uint64_t timestamp; uint32_t id; } submitted[N3DS_TRACE_QUEUE_CAPACITY] = {0};
+    struct trace_mark posted = {0};
+    struct trace_latency queues[3] = {{0}}, acknowledgements[3] = {{0}};
+    unsigned int attempts[3] = {0}, unobserved = 0, cancelled = 0, workers = 0, joins = 0;
+    int first_tick = 0, last_tick = 0, have_loop = 0;
+    for (unsigned int i = 0; i < count; ++i) {
+        const struct trace_record *record = &journal[i];
+        unsigned int kind = record->context.kind < 3 ? record->context.kind : 0;
+        uint32_t id = record->context.submission;
+        struct trace_mark *mark = &submitted[id % N3DS_TRACE_QUEUE_CAPACITY];
+        switch (record->event) {
+            case N3DS_TRACE_LOOP_BEGIN:
+                if (!have_loop) first_tick = record->context.tick;
+                last_tick = record->context.tick;
+                have_loop = 1;
+                break;
+            case N3DS_TRACE_ATTEMPT_BEGIN: ++attempts[kind]; break;
+            case N3DS_TRACE_MIDPOINT_CANCEL: ++cancelled; break;
+            case N3DS_TRACE_WORKER_DISPATCH: ++workers; break;
+            case N3DS_TRACE_JOIN_END: ++joins; break;
+            case N3DS_TRACE_QUEUE_RUN: *mark = (struct trace_mark){record->timestamp, id}; break;
+            case N3DS_TRACE_QUEUE_COMPLETE:
+                if (id && mark->id == id && record->timestamp >= mark->timestamp) {
+                    observe_latency(&queues[kind], record->timestamp - mark->timestamp);
+                    mark->id = 0;
+                }
+                break;
+            case N3DS_TRACE_TOP_SWAP_POSTED:
+                posted = (struct trace_mark){record->timestamp, record->arg0};
+                break;
+            case N3DS_TRACE_TOP_PENDING_CLEAR:
+                if (posted.id && posted.id == record->arg0 && record->timestamp >= posted.timestamp) {
+                    observe_latency(&acknowledgements[kind], record->timestamp - posted.timestamp);
+                    posted.id = 0;
+                }
+                break;
+            case N3DS_TRACE_TOP_ACK_UNOBSERVED: ++unobserved; break;
+        }
+    }
+    char message[320];
+    snprintf(message, sizeof(message),
+        "DEPENDENCY TRACE SUMMARY: loops=%u ticks=%d..%d records=%u dropped=%u/%u/%u identity_lost=%u pending_queue=%u pending_top=%u stop_reason=%s",
+        (unsigned int)loops, first_tick, last_tick, (unsigned int)count, (unsigned int)owner_dropped,
+        (unsigned int)load32(&gpu_events.dropped), (unsigned int)load32(&blank_events.dropped),
+        (unsigned int)load32(&identity_lost), (unsigned int)stop_pending,
+        (unsigned int)pending_top_sequence, stop_reason == 1 ? "loop-limit" : "early-stop");
+    n3ds_log(message);
+    snprintf(message, sizeof(message),
+        "DEPENDENCY TRACE EVENTS: regular_attempts=%u midpoint_attempts=%u midpoint_cancelled=%u top_ack_unobserved=%u worker_dispatches=%u joins=%u",
+        attempts[1], attempts[2], cancelled, unobserved, workers, joins);
+    n3ds_log(message);
+    for (unsigned int kind = 0; kind < 3; ++kind) {
+        report_latency("queue-callback", kind, &queues[kind]);
+        report_latency("top-swap-ack-observed", kind, &acknowledgements[kind]);
+    }
+    n3ds_log("DEPENDENCY TRACE: callback and acknowledgement observations; capture tail unconfirmed");
+}
+#else
 static void put32(unsigned char *out, uint32_t value)
 { for (unsigned int i = 0; i < 4; ++i) out[i] = (unsigned char)(value >> (8*i)); }
 static void put64(unsigned char *out, uint64_t value)
@@ -299,11 +388,15 @@ static void encode_record(unsigned char out[64], const struct trace_record *reco
     out[50]=c->kind; out[51]=record->producer; put32(out+52,record->flags);
     put32(out+56,record->arg0); put32(out+60,record->arg1);
 }
+#endif
 void n3ds_trace_finish(void)
 {
     if (!initialized || finished) return;
     finished = 1; capture_stop(2);
-    if (!started) { n3ds_log("DEPENDENCY TRACE: no gameplay capture; no trace file written"); return; }
+    if (!started) { n3ds_log("DEPENDENCY TRACE: no gameplay capture"); return; }
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    report_capture();
+#else
     unsigned char header[128] = {0}, encoded[64], footer[16] = {0};
     memcpy(header,"H2DSTRC1",8); put32(header+8,N3DS_TRACE_SCHEMA); put32(header+12,sizeof(header));
     put32(header+16,64); put32(header+20,N3DS_TRACE_CAPACITY); put32(header+24,count);
@@ -339,6 +432,7 @@ void n3ds_trace_finish(void)
         (unsigned long)load32(&gpu_events.dropped),(unsigned long)load32(&blank_events.dropped),
         (unsigned long)load32(&identity_lost));
     n3ds_log(message);
+#endif
 }
 void n3ds_trace_initialize(void)
 {
@@ -346,10 +440,11 @@ void n3ds_trace_initialize(void)
     initialized = 1; current.bsp = -1;
     if (atexit(n3ds_trace_finish)) n3ds_log("DEPENDENCY TRACE: exit handler unavailable; normal shutdown export remains");
     char message[256];
-    snprintf(message,sizeof(message),"DEPENDENCY TRACE: enabled=1 schema=%u records=%u buffers_bytes=%u loops=%u start=first-gameplay export=shutdown; overhead unmeasured",
+    snprintf(message,sizeof(message),"DEPENDENCY TRACE: enabled=1 schema=%u records=%u buffers_bytes=%u loops=%u start_tick=%lu export=shutdown; overhead unmeasured",
         N3DS_TRACE_SCHEMA,N3DS_TRACE_CAPACITY,
         (unsigned int)(sizeof(journal)+sizeof(gpu_events)+sizeof(blank_events)+sizeof(queue_tokens)),
-        (unsigned int)HALO_N3DS_DEPENDENCY_TRACE_LOOPS);
+        (unsigned int)HALO_N3DS_DEPENDENCY_TRACE_LOOPS,
+        (unsigned long)HALO_N3DS_DEPENDENCY_TRACE_START_TICK);
     n3ds_log(message);
 }
 #endif

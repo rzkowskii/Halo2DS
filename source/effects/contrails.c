@@ -497,8 +497,10 @@ static void contrail_verify(
 	long contrail_index)
 {
 	struct contrail_datum *contrail = contrail_get(contrail_index);
+#ifndef HALO_N3DS_FAST_CONTRAIL_VERIFY
 	struct contrail_definition *definition = contrail_definition_get(contrail->definition_index);
 	short instance_index;
+#endif
 
 	if (contrail->object_index != NONE)
 	{
@@ -527,6 +529,7 @@ static void contrail_verify(
 				object->object.attachment_indices[contrail->attachment_index]));
 	}
 
+#ifndef HALO_N3DS_FAST_CONTRAIL_VERIFY
 	for (instance_index = 0;
 		instance_index < MAXIMUM_CONTRAIL_INSTANCES;
 		instance_index++)
@@ -551,6 +554,7 @@ static void contrail_verify(
 				contrail->contrail_point_counts[instance_index],
 				contrail_point_count));
 	}
+#endif
 
 	return;
 }
@@ -570,9 +574,20 @@ static void contrail_update_points(
 	{
 		short contrail_point_count = 0;
 		long contrail_point_index = contrail->first_contrail_point_indices[instance_index];
+#ifdef HALO_N3DS_FAST_CONTRAIL_VERIFY
+		/* Count during the update's existing traversal. The bound also
+		 * catches a cycle before it can overflow the index scratch array. */
+		short expected_point_count = contrail->contrail_point_counts[instance_index];
+		match_assert("c:\\halo\\SOURCE\\effects\\contrails.c", 677,
+			expected_point_count >= 0 && expected_point_count <= MAXIMUM_CONTRAIL_POINTS);
+#endif
 
 		while (contrail_point_index != NONE)
 		{
+#ifdef HALO_N3DS_FAST_CONTRAIL_VERIFY
+			match_assert("c:\\halo\\SOURCE\\effects\\contrails.c", 677,
+				contrail_point_count < expected_point_count);
+#endif
 			struct contrail_point_datum *contrail_point = contrail_point_get(contrail_point_index);
 
 			if (!TEST_FLAG(contrail_point->flags, _contrail_point_expired_bit))
@@ -659,6 +674,10 @@ static void contrail_update_points(
 			contrail_point_indices[contrail_point_count++] = contrail_point_index;
 			contrail_point_index = contrail_point->next_contrail_point_index;
 		}
+#ifdef HALO_N3DS_FAST_CONTRAIL_VERIFY
+		match_assert("c:\\halo\\SOURCE\\effects\\contrails.c", 677,
+			contrail_point_count == expected_point_count);
+#endif
 
 		while (contrail_point_count > 1)
 		{

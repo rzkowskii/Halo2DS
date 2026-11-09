@@ -67,7 +67,7 @@ validates the derived data at publication. Verification is excluded from timing.
 
 | Available option | Candidate scope |
 | --- | --- |
-| `--algo-prepared-view` | Move frusta, portal visibility and ordered object discovery before the GPU fence for a regular mono view following a queued midpoint. Requires `--present-60`. Verification draws using the late reference results. |
+| `--algo-prepared-view` | Move frusta, portal visibility and ordered object discovery before GPU acquisition in active mono campaign play, including frames with no submitted midpoint. Verification draws using the late reference results. |
 | `--algo-shared-skinning` | Reuse exact cached raw normals for paired CPU stream consumers in water and native glass. Skip lighting those paths replace. Midpoint misses leave reusable regular pose entries intact. |
 | `--algo-inverse-bind` | Reuse complete inverse-bind product arrays when generation, model, object and matrix bytes match. Separate regular and midpoint banks. |
 | `--algo-midpoint-quaternions` | Retain exact endpoint quaternions lazily in each snapshot bank. Requires `--present-60`. |
@@ -76,6 +76,7 @@ validates the derived data at publication. Verification is excluded from timing.
 | `--algo-collision-features` | Query-local membership for accepted features in first-seen order. |
 | `--algo-collision-active-planes` | Query-local lookup by oriented plane, preserving the active stack's first match. |
 | `--algo-uv-outputs` | Candidate only. Picasso assembles one fewer instruction in each of rigid and skin lit/reflect. Physical colour/depth comparison remains required. |
+| `--algo-model-quaternion-direct` | Candidate only. The shared rigid and skinned lighting shaders write the original normalized quaternion or fallback directly to the output. The usual path executes two fewer instructions and the fallback executes one fewer. |
 | `--algo-retained-skin` | Reuse posed positions and raw normals across UV and lighting changes. Normal consumers receive a frame-owned copy. Additional normal storage is capped at 512 KiB on New models and 128 KiB on Original models. |
 | `--algo-region-selection` | Retain resolved permutation geometry indices across LOD changes within the existing part cache. Each view still selects LOD and preserves part order. |
 | `--algo-compressed-tracks` | Retain validated constant values and raw key endpoints for map-owned animation streams. Seek and interval misses retain the reference search and exact-key path. |
@@ -88,6 +89,13 @@ validates the derived data at publication. Verification is excluded from timing.
 | `--algo-skin-mad` | Candidate only. Use PICA MAD for the second weighted term across skin programs. Native arithmetic equivalence requires device evidence. |
 | `--algo-water-base` | Candidate only. Water base pass bypasses reflection work. The reflection path pays one additional branch. |
 | `--algo-midpoint-particles` | Candidate only. Interpolate eligible detached positions and borrow same-view nodes from accepted ordinary parent draws for eligible attached sprites. Requires `--present-60`. |
+| `--algo-midpoint-swap-overlap` | Candidate only. Record an optional frame while a posted top-screen swap awaits acknowledgement, then require acknowledgement before submission. Requires `--present-60`. |
+| `--algo-chicago-map-uv` | Candidate only. Select the active UV transforms in rigid and skinned Chicago model shaders from the draw's map count. |
+| `--algo-chicago-neutral-draws` | Candidate only. Omit Chicago draws whose quantized fade or baked texels prove an identity blend, with no depth, alpha or stencil writes. |
+| `--algo-chicago-alpha-zero` | Candidate only. Reject zero-alpha fragments in ordinary alpha-blended Chicago draws without stencil writes. Keeps the authored alpha tests. |
+| `--algo-model-reflection-direct` | Candidate only. Select diffuse/detail or reflection with one Boolean branch and write the existing color and cube/UV outputs directly. |
+| `--algo-adpcm-table` | Candidate only. Pack the signed Xbox ADPCM delta and next step index into one lookup word, cutting the table from 11,392 to 5,696 bytes. |
+| `--algo-adpcm-loops` | Candidate only. Decode mono and interleaved stereo in byte pairs, use ARM saturation for PCM16, and consume only the low nibble of each channel's final byte. |
 
 The following reserved options accept `reference` only. The build CLI and
 compiler guards reject unavailable modes.
@@ -95,8 +103,6 @@ compiler guards reject unavailable modes.
 | Option | Proposed slice |
 | --- | --- |
 | `--algo-support-corners` | CPU-C: two-corner rectangle classification |
-| `--algo-adpcm-table` | AUDIO-A1: exact packed lookup words |
-| `--algo-adpcm-loops` | AUDIO-A2: exact mono/stereo loop specialization |
 | `--algo-root-decode` | CPU-D: partial root-only cache population |
 | `--algo-collision-inverse` | CPU-E1: reuse identical posed inverses |
 | `--algo-collision-topology` | CPU-E2: reuse immutable topology preparation |
@@ -157,11 +163,11 @@ and timings do not alter decoder, cache, worker-split or rendering decisions.
 | --- | --- | --- |
 | Animation | Root matrix/velocity requests; full-pose calls; cache hit/miss/bypass; compressed/raw decode requests and nodes; explicit pose copies; interpolation/hierarchy work | Root-pose candidates copy only node zero on complete-pose hits; misses still use the full decoder. No root-only miss decoder or tracking of later full requests. |
 | Transforms | Portal point work and collision-model point/vector/inverse calls | Not global VFP traffic; worker kernels are not instrumented per vertex |
-| Visibility | Rectangle and plane work, cluster visits, portal cache/project work, candidate-mask hits/misses/bypass and triangle-owner scans; prepared-view verify compares ordered owned results | Prepared-view comparison covers only the eligible mono view following a submitted midpoint. No incremental membership algorithm. |
+| Visibility | Rectangle and plane work, cluster visits, portal cache/project work, candidate-mask hits/misses/bypass and triangle-owner scans. Prepared-view verification compares ordered results in eligible regular mono views. | The early preparation pass owns one frame's CPU results. Membership is recomputed. |
 | Model preparation | Decode/pose/normal hits and misses, attempted vertex batches, explicit shadow/matrix copies, budget evictions and fallback/failure counts | Attempted batches may stop early; counts alone cannot establish CPU cost |
 | Audio | Complete native update and planning/decode-join/submission ticks, input bytes, jobs, output frames/packets, active voices and refill-drain events | Native update can run more than once per loop; drain events are not proof of audible dropouts; whole `sound_render` timing remains separate |
 | Parallel work | Serial and worker batch/item counts by audio/decode/pose category; complete batch, wake, main/helper/join ticks and batch maximum | Main/helper execution overlaps; the complete batch is the comparison unit; scheduling is unchanged |
-| Sound cache | Request/hit/load origins, staged-copy and synchronous-read bytes/time, allocation/eviction/admission and scan counters | Does not time the background encoded reader or filesystem contention |
+| Sound cache | Request/hit/load origins, staged-copy and synchronous-read bytes/time, absent/late/failed stages, authored continuation offers and hits, allocation/eviction/admission and scan counters | Does not time the background encoded reader or filesystem contention |
 | GPU | Actual submissions/completed queues, queue/preparation/retire-wait time, local draw/triangle/pass counts, frame-arena flush bytes, command-use peak, successful adjacent merge savings | Queue includes transfers; retire wait can include VBlank; local draw counters exclude other GPU modules and can include discarded midpoint preparation |
 | Memory | Ordinary and linear heap sampled peaks at loop end, and event-based texture staging peak for synchronous and asynchronous inputs and unpublished output payloads | Heap samples may miss transient peaks. Texture staging excludes allocator overhead, audio scratch and unrelated GPU staging. |
 

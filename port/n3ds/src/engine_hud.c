@@ -36,6 +36,20 @@ static long control_unit=NONE;
 static unsigned int control_generation;
 static unsigned int panel_pixels[512*64],panel_revision;
 static int panel_state=-1;
+enum { PANEL_FRAG, PANEL_PLASMA, PANEL_MELEE, PANEL_LIGHT, PANEL_RELOAD };
+enum { PANEL_ROW_Y=188, PANEL_ROW_HEIGHT=46 };
+static const struct native_touch_button touch_buttons[]={
+    [PANEL_FRAG]={.screen={79,PANEL_ROW_Y,78,PANEL_ROW_HEIGHT},.atlas_x=79},
+    [PANEL_PLASMA]={.screen={163,PANEL_ROW_Y,78,PANEL_ROW_HEIGHT},.atlas_x=163},
+    [PANEL_MELEE]={.screen={248,PANEL_ROW_Y,64,PANEL_ROW_HEIGHT},.atlas_x=248},
+    [PANEL_LIGHT]={.screen={8,PANEL_ROW_Y,64,PANEL_ROW_HEIGHT},.atlas_x=8},
+    [PANEL_RELOAD]={
+        .screen={NATIVE_TOUCH_RELOAD_X,NATIVE_TOUCH_RELOAD_Y,NATIVE_TOUCH_RELOAD_WIDTH,NATIVE_TOUCH_RELOAD_HEIGHT},
+        .tap={NATIVE_TOUCH_RELOAD_TAP_X,NATIVE_TOUCH_RELOAD_TAP_Y,
+            NATIVE_TOUCH_RELOAD_TAP_WIDTH,NATIVE_TOUCH_RELOAD_TAP_HEIGHT},
+        .atlas_x=320
+    }
+};
 static long touch_unit(void)
 {
     if(!game_in_progress() || main_menu_is_active() || game_time_get_paused() || ui_widgets_active_for_local_player(0) ||
@@ -45,55 +59,57 @@ static long touch_unit(void)
     long unit=player_get(player)->unit_index;
     return unit!=NONE && unit==control_unit && !TEST_FLAG(unit_get(unit)->object.damage_flags,_object_dead_bit)?unit:NONE;
 }
-static unsigned int touch_action(unsigned int x,unsigned int y)
+static unsigned int touch_button_action(int button,long unit)
 {
-    long unit=touch_unit();
-    if(unit==NONE || x>=320) return 0;
-    int actions_enabled=!cinematic_in_progress() && player_input_enabled();
-    if(hud_visible && actions_enabled &&
-       x>=NATIVE_TOUCH_RELOAD_X && x<NATIVE_TOUCH_RELOAD_X+NATIVE_TOUCH_RELOAD_WIDTH &&
-       y>=NATIVE_TOUCH_RELOAD_Y && y<NATIVE_TOUCH_RELOAD_Y+NATIVE_TOUCH_RELOAD_HEIGHT)
-        return NATIVE_TOUCH_RELOAD;
-    if(y<NATIVE_TOUCH_AIM_BOTTOM) {
-        unsigned int action=actions_enabled?NATIVE_TOUCH_JUMP:0;
-        if(!player_control_camera_control_is_active()) return action;
-        /* A10's calibration/tutorial can hide every HUD element while the
-         * player must look around. Full unit control can remain disabled.
-         * Feed the original look path, including its tutorial action tests;
-         * director inhibition is applied later by the original engine. */
-        static unsigned int reported_generation;
-        if(!hud_visible && reported_generation!=control_generation) {
-            n3ds_log("TOUCH AIM: available during gameplay with HUD hidden");
-            reported_generation=control_generation;
-        }
-        return action|NATIVE_TOUCH_AIM;
-    }
-    /* Invisible buttons remain inactive and cannot steal a drag gesture. */
-    if(!hud_visible || !actions_enabled) return 0;
-    if(y<184 || y>=236) return 0;
-    int grenade=x>=8 && x<104?0:x>=112 && x<208?1:-1;
-    if(grenade>=0) {
+    if(button==PANEL_RELOAD) return NATIVE_TOUCH_RELOAD;
+    if(button==PANEL_MELEE) return NATIVE_TOUCH_MELEE;
+    if(button==PANEL_FRAG || button==PANEL_PLASMA) {
+        int grenade=button;
         struct player_control *control=player_control_get(0);
         if(control->unit_index!=unit || !unit_get_grenade_count(unit,grenade)) return 0;
         int desired=control->desired_grenade_index;
         if(desired<0 || desired>=NUMBER_OF_UNIT_GRENADE_TYPES) desired=unit_get(unit)->unit.desired_grenade_index;
         if(desired<0 || desired>=NUMBER_OF_UNIT_GRENADE_TYPES) desired=unit_get_current_grenade_type(unit);
-        if(desired==grenade) return 0;
-        extern void n3ds_log(const char *);char message[96];
-        snprintf(message,sizeof(message),"TOUCH CONTROL: grenade request=%d prior=%d through original input",grenade,desired);n3ds_log(message);
-        return 1;
+        return desired==grenade?0:NATIVE_TOUCH_GRENADE;
     }
-    if(x>=216 && x<312 && game_engine_allow_integrated_lights(unit)) {
-        extern void n3ds_log(const char *);
-        n3ds_log("TOUCH CONTROL: flashlight press through original input");return 2;
+    if(button==PANEL_LIGHT && game_engine_allow_integrated_lights(unit)) {
+        n3ds_log("TOUCH CONTROL: flashlight press through original input");
+        return NATIVE_TOUCH_FLASHLIGHT;
     }
     return 0;
+}
+static unsigned int touch_action(unsigned int x,unsigned int y)
+{
+    long unit=touch_unit();
+    if(unit==NONE || x>=320 || y>=240) return 0;
+    int actions_enabled=!cinematic_in_progress() && player_input_enabled();
+    if(hud_visible && actions_enabled) {
+        /* Reload sits inside the aiming area. Give it the contact first. */
+        for(int button=0;button<NUMBEROF(touch_buttons);++button) {
+            const struct native_touch_button *layout=&touch_buttons[button];
+            const struct native_touch_rect *rect=layout->tap.width?&layout->tap:&layout->screen;
+            if(x>=rect->x && x<rect->x+rect->width && y>=rect->y && y<rect->y+rect->height)
+                return touch_button_action(button,unit);
+        }
+    }
+    if(y>=NATIVE_TOUCH_AIM_BOTTOM) return 0;
+    unsigned int action=actions_enabled?NATIVE_TOUCH_JUMP:0;
+    if(!player_control_camera_control_is_active()) return action;
+    /* A10's calibration/tutorial can hide every HUD element while the
+     * player must look around. Feed the original camera path even when
+     * full unit control is disabled. */
+    static unsigned int reported_generation;
+    if(!hud_visible && reported_generation!=control_generation) {
+        n3ds_log("TOUCH AIM: available during gameplay with HUD hidden");
+        reported_generation=control_generation;
+    }
+    return action|NATIVE_TOUCH_AIM;
 }
 static void panel_rect(int x,int y,int w,int h,unsigned int color)
 {
     for(int j=y;j<y+h;++j) for(int i=x;i<x+w;++i) panel_pixels[j*512+i]=color;
 }
-static void panel_text(int x,int y,const char *text,unsigned int color)
+static void panel_text(int x,int y,const char *text,int width,unsigned int color)
 {
     /* Small 5x7 face at native LCD resolution; each glyph has seven row masks. */
     static const char letters[]="FLIGHTON-RAPSM0123456789ED";
@@ -107,10 +123,28 @@ static void panel_text(int x,int y,const char *text,unsigned int color)
         {30,1,1,14,1,1,30},{2,6,10,18,31,2,2},{31,16,16,30,1,1,30},
         {14,16,16,30,17,17,14},{31,1,2,4,8,8,8},{14,17,17,14,17,17,14},{14,17,17,15,1,1,14},
         {31,16,16,30,16,16,31},{30,17,17,17,17,17,30}};
-    for(;*text;++text,x+=12) {
-        const char *g=strchr(letters,*text);if(!g) continue;
-        for(int j=0;j<7;++j) for(int i=0;i<5;++i) if(glyphs[g-letters][j]&(16>>i)) panel_rect(x+i*2,y+j*2,2,2,color);
+    const int source_width=(int)strlen(text)*12-2;
+    /* Sample the center of each column to keep the compact label pixel-sharp. */
+    for(int col=0;col<width;++col) {
+        int source_col=(2*col+1)*source_width/(2*width);
+        int bit=(source_col%12)/2;
+        if(bit>=5) continue;
+        const char *g=strchr(letters,text[source_col/12]);
+        if(!g) continue;
+        for(int row=0;row<7;++row)
+            if(glyphs[g-letters][row]&(16>>bit)) panel_rect(x+col,y+row*2,1,2,color);
     }
+}
+static void panel_label(int x,int width,int y,const char *text,unsigned int color)
+{
+    int text_width=(int)strlen(text)*12-2;
+    panel_text(x+(width-text_width)/2,y,text,text_width,color);
+}
+static void panel_card(int x,int width,int height,unsigned int accent)
+{
+    panel_rect(x,0,width,height,0x35536bff);
+    panel_rect(x+1,1,width-2,height-2,accent?0x1b3445ff:0x102235ff);
+    panel_rect(x+3,2,width-6,2,accent?accent:0x477494ff);
 }
 static void draw_touch_panel(void)
 {
@@ -122,22 +156,50 @@ static void draw_touch_panel(void)
     int counts[2]={unit_get_grenade_count(unit,0),unit_get_grenade_count(unit,1)};
     int selected=unit_get_current_grenade_type(unit);
     int key=state|(counts[0]<<4)|(counts[1]<<12)|((selected+1)<<20);
+    const unsigned int label=0xc3e5ffff,blue=0x71b9ffff,muted=0x8a9cadff,active=0xd7ec7eff;
     if(key!=panel_state) {
         memset(panel_pixels,0,sizeof(panel_pixels));
-        panel_rect(NATIVE_TOUCH_RELOAD_ATLAS_X,0,NATIVE_TOUCH_RELOAD_WIDTH,NATIVE_TOUCH_RELOAD_HEIGHT,0x71b9ffff);
-        panel_rect(NATIVE_TOUCH_RELOAD_ATLAS_X+2,2,NATIVE_TOUCH_RELOAD_WIDTH-4,NATIVE_TOUCH_RELOAD_HEIGHT-4,0x12283eff);
-        panel_text(NATIVE_TOUCH_RELOAD_ATLAS_X+13,9,"RELOAD",0x71b9ffff);
-        unsigned int color=state?0x71b9ffff:0x516172ff;
-        panel_rect(216,0,96,52,color);panel_rect(218,2,92,48,0x12283eff);
-        panel_text(228,6,"LIGHT",color);panel_text(228,31,state==2?"ON":state==1?"OFF":"-",color);
-        /* A simple lamp and beam remain distinguishable beside the label. */
-        panel_rect(279,32,12,8,color);panel_rect(291,30,3,12,color);
-        if(state==2) {panel_rect(298,27,6,2,color);panel_rect(298,35,6,2,color);panel_rect(298,43,6,2,color);}
+        const struct native_touch_button *reload=&touch_buttons[PANEL_RELOAD];
+        panel_card(reload->atlas_x,reload->screen.width,reload->screen.height,0);
+        const int reload_label_width=58;
+        panel_text(reload->atlas_x+(reload->screen.width-reload_label_width)/2,
+            11,"RELOAD",reload_label_width,label);
+
+        const struct native_touch_button *light=&touch_buttons[PANEL_LIGHT];
+        int lamp_x=light->atlas_x;
+        unsigned int light_ink=state==2?active:state?blue:muted;
+        const char *light_status=state==2?"ON":state==1?"OFF":"-";
+        panel_card(lamp_x,light->screen.width,light->screen.height,state==2?active:0);
+        panel_label(lamp_x,light->screen.width,8,"LIGHT",state?label:muted);
+        panel_text(lamp_x+25,27,light_status,(int)strlen(light_status)*12-2,light_ink);
+        panel_rect(lamp_x+7,31,8,6,light_ink);
+        panel_rect(lamp_x+15,29,3,10,light_ink);
+        if(state==2) {
+            for(int y=28;y<=38;y+=5) panel_rect(lamp_x+20,y,3,2,light_ink);
+        }
+
+        const struct native_touch_button *melee=&touch_buttons[PANEL_MELEE];
+        panel_card(melee->atlas_x,melee->screen.width,melee->screen.height,0);
+        panel_label(melee->atlas_x,melee->screen.width,8,"MELEE",label);
+        /* Knuckles and wrist of a closed fist. */
+        int fist_x=melee->atlas_x+melee->screen.width/2-11;
+        panel_rect(fist_x+4,25,4,3,blue);
+        panel_rect(fist_x+10,25,4,3,blue);
+        panel_rect(fist_x+16,26,4,2,blue);
+        panel_rect(fist_x+4,28,18,8,blue);
+        panel_rect(fist_x,30,6,5,blue);
+        panel_rect(fist_x+6,36,14,4,blue);
+        panel_rect(fist_x+8,40,10,2,blue);
+
         for(int g=0;g<2;++g) {
-            int x=8+104*g;unsigned int ink=counts[g]?0x71b9ffff:0x516172ff;
-            panel_rect(x,0,96,52,selected==g?0xd7ec7eff:ink);panel_rect(x+2,2,92,48,0x12283eff);
-            panel_text(x+8,6,g?"PLASMA":"FRAG",ink);
-            char number[8];snprintf(number,sizeof(number),"%d",counts[g]);panel_text(x+60,29,number,ink);
+            const struct native_touch_button *button=&touch_buttons[g];
+            int x=button->atlas_x,width=button->screen.width;
+            int highlighted=counts[g]>0 && selected==g;
+            panel_card(x,width,button->screen.height,highlighted?active:0);
+            panel_label(x,width,8,g?"PLASMA":"FRAG",counts[g]?label:muted);
+            char number[8];snprintf(number,sizeof(number),"%d",counts[g]);
+            panel_label(x+width/2,width/2,27,number,
+                highlighted?active:counts[g]?blue:muted);
         }
         panel_state=key;++panel_revision;
         extern void n3ds_log(const char *);char message[128];
@@ -145,7 +207,7 @@ static void draw_touch_panel(void)
     }
     n3ds_hud_screen(1);
     n3ds_gpu_hud_layout(0);
-    assert(n3ds_gpu_touch_panel(panel_pixels,panel_revision));
+    assert(n3ds_gpu_touch_panel(panel_pixels,panel_revision,touch_buttons,NUMBEROF(touch_buttons)));
     /* Draw the same atlas sprites selected by each grenade's original HUD tag.
      * Keep their aspect ratio, counts and full-size touch areas. */
     for(int g=0;g<2;++g) {
@@ -164,8 +226,10 @@ static void draw_touch_panel(void)
         full_clip.x0=bounds[0];full_clip.y0=bounds[1];full_clip.x1=bounds[2];full_clip.y1=bounds[3];clip=&full_clip;
         float w=bitmap->width*(clip->x1-clip->x0),h=bitmap->height*(clip->y1-clip->y0);
         if(w<=0 || h<=0) continue;
-        float scale=fminf(34.f/w,28.f/h);w*=scale;h*=scale;
-        float x=8+104*g+27-w*.5f,y=184+35-h*.5f;
+        float scale=fminf(30.f/w,20.f/h);w*=scale;h*=scale;
+        const struct native_touch_rect *rect=&touch_buttons[g].screen;
+        float x=rect->x+rect->width*.25f-w*.5f;
+        float y=rect->y+34-h*.5f;
         struct native_text_vertex v[4]={0};
         static const float corners[4][2]={{0,0},{1,0},{1,1},{0,1}};
         for(int i=0;i<4;++i) {
@@ -175,7 +239,7 @@ static void draw_touch_panel(void)
             v[i].uv[1]=clip->y0+(clip->y1-clip->y0)*t;
             for(int c=0;c<4;++c) v[i].color[c]=1;
         }
-        assert(n3ds_gpu_text_begin(320,240,counts[g]?0xffffb971:0xff726151,0,0));
+        assert(n3ds_gpu_text_begin(320,240,counts[g]?0xffffb971:0xffad9c8a,0,0));
         n3ds_gpu_framebuffer_blend(NATIVE_BLEND_ALPHA);
         assert(n3ds_gpu_text_draw(v));
         static unsigned int logged_generation[2];

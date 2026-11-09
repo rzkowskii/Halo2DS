@@ -28,6 +28,32 @@ static struct native_widget_vertex *blocks[WIDGET_BLOCKS];
 static unsigned int budget_drops;
 static unsigned int deferred,immediate,flushes;
 static int dirty;
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+static unsigned short *resident_quad_indices;
+#ifdef HALO_N3DS_PERFORMANCE_PROFILE
+static unsigned long long resident_quad_batches,resident_quad_bytes;
+#endif
+
+const unsigned short *n3ds_gpu_effect_resident_quad_indices(void)
+{
+    return resident_quad_indices;
+}
+
+static void initialize_quad_indices(void)
+{
+    static const unsigned short corners[]={0,1,2,0,2,3};
+    const unsigned int bytes=N3DS_EFFECT_QUAD_INDICES*sizeof(*resident_quad_indices);
+    unsigned short *indices=linearAlloc(bytes);
+    if(!indices) return;
+    for(unsigned int i=0;i<N3DS_EFFECT_QUAD_INDICES;i+=6) {
+        unsigned int base=i/6*4;
+        for(unsigned int j=0;j<6;++j) indices[i+j]=base+corners[j];
+    }
+    /* The renderer waits for queued GPU references before disposing widgets. */
+    if(R_FAILED(GSPGPU_FlushDataCache(indices,bytes))) {linearFree(indices);return;}
+    resident_quad_indices=indices;
+}
+#endif
 #if HALO_N3DS_RENDERER_TESTS
 /* Test-only hardware input precision and legacy control. Never enabled in play. */
 static int glow_test_quantize,glow_test_legacy;
@@ -62,6 +88,16 @@ void n3ds_gpu_widgets_dispose(void)
 {
     char message[128];snprintf(message,sizeof(message),"WIDGET TRANSFERS: deferred=%u immediate=%u frame_flushes=%u effect_state_reuses=%u",deferred,immediate,flushes,effect_state_reused);
     n3ds_log(message);deferred=immediate=flushes=0;dirty=0;
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+#ifdef HALO_N3DS_PERFORMANCE_PROFILE
+    if(resident_quad_indices) {
+        snprintf(message,sizeof(message),"EFFECT RESIDENT QUAD INDICES: batches=%llu index_upload_bytes_avoided=%llu",resident_quad_batches,resident_quad_bytes);
+        n3ds_log(message);
+    }
+    resident_quad_batches=resident_quad_bytes=0;
+#endif
+    linearFree(resident_quad_indices);resident_quad_indices=NULL;
+#endif
     n3ds_gpu_program_park();
     if(packed_ready) shaderProgramFree(&packed_program);
     if(packed_shader) DVLB_Free(packed_shader);packed_shader=NULL;packed_ready=0;
@@ -93,6 +129,14 @@ int n3ds_gpu_widgets_initialize(void)
         AttrInfo_AddLoader(attributes,1,GPU_FLOAT,packed?2:4);
         AttrInfo_AddLoader(attributes,2,packed?GPU_UNSIGNED_BYTE:GPU_FLOAT,packed?4:2);
     }
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+    initialize_quad_indices();
+#ifdef HALO_N3DS_PERFORMANCE_PROFILE
+    n3ds_log(resident_quad_indices?"EFFECT QUAD INDICES: candidate ready":"EFFECT QUAD INDICES: candidate unavailable; transient fallback");
+#endif
+#elif defined(HALO_N3DS_PERFORMANCE_PROFILE)
+    n3ds_log("EFFECT QUAD INDICES: reference");
+#endif
     return 1;
 fail:n3ds_gpu_widgets_dispose();return 0;
 }
@@ -213,6 +257,12 @@ static int effect_draw(const void *input,unsigned int count,
         }
         return 1;
     }
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+    int resident=indices && indices==resident_quad_indices;
+    if(resident) {
+        if(!packed || count%4 || count>N3DS_EFFECT_BATCH_VERTICES || index_count!=count/4*6) return 0;
+    } else
+#endif
     for(unsigned int i=0;i<index_count;++i) if(!indices || indices[i]>=count) return 0;
     for(unsigned int i=0;i<count;++i) {
         const float *p=packed?raw[i].position:vertices[i].position;
@@ -235,6 +285,12 @@ static int effect_draw(const void *input,unsigned int count,
     effect_projection=projection;
     if(!retained) C3D_SetAttrInfo(&widget_attributes[!!packed]);
     int same=retained && effect_state_blend==blend && effect_state_shader==shader_flags && effect_state_geometry==geometry_flags;
+#ifdef HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO
+    /* The phase is fixed for the frame, and frame begin invalidates retained
+     * state. With SRC_ALPHA / ONE_MINUS_SRC_ALPHA, zero final alpha leaves
+     * RGB intact. This path masks alpha/depth writes and keeps stencil. */
+    int reject_zero_alpha=blend==NATIVE_BLEND_ALPHA && n3ds_gpu_probe_effect_alpha_zero();
+#endif
     if(!same) {
     C3D_TexEnvBufUpdate(C3D_Both,0);C3D_TexEnvBufColor(0);
     for(unsigned int i=0;i<6;++i) C3D_TexEnvInit(C3D_GetTexEnv(i));
@@ -267,7 +323,13 @@ static int effect_draw(const void *input,unsigned int count,
             C3D_TexEnvFunc(env,C3D_RGB,GPU_MULTIPLY_ADD);
         }
     }
-    C3D_CullFace(GPU_CULL_NONE);C3D_AlphaTest(false,GPU_ALWAYS,0);n3ds_gpu_framebuffer_blend(blend);
+    C3D_CullFace(GPU_CULL_NONE);
+#ifdef HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO
+    C3D_AlphaTest(reject_zero_alpha,reject_zero_alpha?GPU_GREATER:GPU_ALWAYS,0);
+#else
+    C3D_AlphaTest(false,GPU_ALWAYS,0);
+#endif
+    n3ds_gpu_framebuffer_blend(blend);
     } else ++effect_state_reused;
     effect_state_valid=1;effect_state_packed=packed;effect_state_blend=blend;
     effect_state_shader=shader_flags;effect_state_geometry=geometry_flags;
@@ -287,7 +349,11 @@ static int effect_draw(const void *input,unsigned int count,
     }
     flush_written(count);
     int success=0;
-    const unsigned short *gpu_indices=indices?n3ds_gpu_indices_upload(indices,index_count):NULL;
+    const unsigned short *gpu_indices=
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+        resident?indices:
+#endif
+        indices?n3ds_gpu_indices_upload(indices,index_count):NULL;
     if(indices && !gpu_indices) goto restore_sampler;
     success=indices || n3ds_gpu_vertex_buffer_bind(submitted,stride,3,0x210);
     if(success) {
@@ -300,10 +366,25 @@ static int effect_draw(const void *input,unsigned int count,
             C3D_DepthTest(!(geometry_flags&(1u<<3)) && !pass,GPU_GEQUAL,GPU_WRITE_COLOR&~GPU_WRITE_ALPHA);
             C3D_StencilTest(true,GPU_EQUAL,first_person&&!pass?1:0,1,0);
             C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_KEEP,GPU_STENCIL_KEEP);
-            if(indices) {if(!n3ds_gpu_indexed_draw(submitted,gpu_indices,index_count,stride,3,0x210)) {success=0;goto restore_sampler;}}
-            else C3D_DrawArrays(GPU_TRIANGLES,0,count);
+            if(indices) {
+                int drawn=
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+                    resident?n3ds_gpu_indexed_draw_resident(submitted,gpu_indices,index_count,stride,3,0x210):
+#endif
+                    n3ds_gpu_indexed_draw(submitted,gpu_indices,index_count,stride,3,0x210);
+                if(!drawn) {success=0;goto restore_sampler;}
+            } else C3D_DrawArrays(GPU_TRIANGLES,0,count);
+#ifdef HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO
+            if(blend==NATIVE_BLEND_ALPHA) n3ds_gpu_probe_alpha_effect_draw(reject_zero_alpha);
+#endif
         }
     }
+#if defined(HALO_N3DS_RESIDENT_QUAD_INDICES) && defined(HALO_N3DS_PERFORMANCE_PROFILE)
+    if(success && resident) {
+        ++resident_quad_batches;
+        resident_quad_bytes+=index_count*sizeof(*indices);
+    }
+#endif
 restore_sampler:
     texture->param=sampler;texture->border=border;n3ds_gpu_texture_bind(0,texture);
     return success;

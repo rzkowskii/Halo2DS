@@ -11,7 +11,11 @@ static unsigned int test_aim_touch(unsigned int x,unsigned int y)
 {
     if(!aim_available || x>=320) return 0;
     if(y<NATIVE_TOUCH_AIM_BOTTOM) return NATIVE_TOUCH_AIM;
-    if(y>=184 && y<236 && x>=216 && x<312) return NATIVE_TOUCH_FLASHLIGHT;
+    if(y>=188 && y<234) {
+        if(x>=8 && x<72) return NATIVE_TOUCH_FLASHLIGHT;
+        if((x>=79 && x<157) || (x>=163 && x<241)) return NATIVE_TOUCH_GRENADE;
+        if(x>=248 && x<312) return NATIVE_TOUCH_MELEE;
+    }
     return 0;
 }
 int halo_engine_touch_aim_tests(void)
@@ -46,14 +50,22 @@ int halo_engine_touch_aim_tests(void)
     AIM_CHECK(pad->sticks[1].x==32767 && pad->sticks[1].y==32767);
     s.touch_x=0;s.touch_y=175;SAMPLE();
     AIM_CHECK(pad->sticks[1].x==-32768 && pad->sticks[1].y==-32768);
-    s.touch_x=270;s.touch_y=200;SAMPLE();
+    s.touch_x=40;s.touch_y=220;SAMPLE();
     AIM_CHECK(!pad->sticks[1].x && !pad->sticks[1].y && !pad->buttons[5]);
     s.touch_x=100;s.touch_y=100;SAMPLE();
     AIM_CHECK(!pad->sticks[1].x && !pad->sticks[1].y && !pad->buttons[5]);
-    RELEASE();s.touch_x=270;s.touch_y=200;SAMPLE();AIM_CHECK(pad->buttons[5]==1);
+    RELEASE();s.touch_x=40;s.touch_y=220;SAMPLE();AIM_CHECK(pad->buttons[5]==1);
     SAMPLE();AIM_CHECK(!pad->buttons[5]);
     s.touch_x=100;s.touch_y=100;SAMPLE();AIM_CHECK(!pad->sticks[1].x && !pad->buttons[5]);
     RELEASE();SAMPLE();s.touch_x=105;SAMPLE();AIM_CHECK(pad->sticks[1].x==32767);
+    s.touch_x=118;s.touch_y=210;SAMPLE();
+    AIM_CHECK(!pad->sticks[1].x && !pad->sticks[1].y && !pad->buttons[_gamepad_analog_button_black]);
+    s.touch_x=105;s.touch_y=100;SAMPLE();
+    AIM_CHECK(!pad->sticks[1].x && !pad->sticks[1].y && !pad->buttons[_gamepad_analog_button_black]);
+    RELEASE();s.touch_x=118;s.touch_y=210;SAMPLE();
+    AIM_CHECK(pad->buttons[_gamepad_analog_button_black]==1 && !pad->sticks[1].x && !pad->sticks[1].y);
+    SAMPLE();AIM_CHECK(!pad->buttons[_gamepad_analog_button_black]);
+    RELEASE();s.touch_x=105;s.touch_y=100;SAMPLE();
     aim_available=0;s.touch_x=110;SAMPLE();AIM_CHECK(!pad->sticks[1].x);
     aim_available=1;s.touch_x=115;SAMPLE();AIM_CHECK(!pad->sticks[1].x);
     RELEASE();aim_available=0;SAMPLE();aim_available=1;s.touch_x=120;SAMPLE();
@@ -98,9 +110,24 @@ int halo_engine_touch_aim_tests(void)
         AIM_CHECK(aim.x==((axes&NATIVE_AIM_X)?0:right.x));
         AIM_CHECK(aim.y==((axes&NATIVE_AIM_Y)?-32767:right.y));
     }
+    s.cstick_x=s.cstick_y=0;
+    RELEASE();s.touch_x=280;s.touch_y=210;SAMPLE();
+    AIM_CHECK(!pad->buttons[_gamepad_analog_button_b]);
+    n3ds_input_gameplay_controls(1);
+    SAMPLE();AIM_CHECK(!pad->buttons[_gamepad_analog_button_b]);
+    RELEASE();SAMPLE();
+    AIM_CHECK(pad->buttons[_gamepad_analog_button_b]==1 &&
+        pad->analog_buttons[_gamepad_analog_button_b]==255 && !pad->sticks[1].x && !pad->sticks[1].y);
+    SAMPLE();AIM_CHECK(!pad->buttons[_gamepad_analog_button_b]);
+    RELEASE();s.touch_x=160;s.touch_y=160;SAMPLE();
+    s.touch_x=280;s.touch_y=210;SAMPLE();
+    AIM_CHECK(!pad->buttons[_gamepad_analog_button_b] && !pad->sticks[1].x && !pad->sticks[1].y);
+    RELEASE();input_suppress();SAMPLE();input_update();
+    SAMPLE();AIM_CHECK(!pad->buttons[_gamepad_analog_button_b]);
     input_dispose();
     n3ds_log("PASS: touch drag aiming, direction, stationary/release, clamping, C-stick coexistence, button isolation, region boundaries and gameplay cancellation");
     n3ds_log("PASS: isolated touch look axes and C-stick tuning in the camera-only context");
+    n3ds_log("PASS: touch melee pulses on a fresh gameplay tap, with hold, drag and suppression isolation");
     n3ds_controls_set(&saved);return 0;
 #undef RELEASE
 #undef SAMPLE

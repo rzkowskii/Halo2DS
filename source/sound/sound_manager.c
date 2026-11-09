@@ -673,10 +673,6 @@ static real source_distance(
 static real source_distance_squared(
 	short listener_index,
 	struct sound_source *source);
-static boolean sound_preempts_sound(
-	long challenger_sound_index,
-	long champion_sound_index,
-	real challenger_distance_squared);
 static short sound_find_best_channel(
 	long sound_index);
 static short source_audible(
@@ -2065,33 +2061,6 @@ static real source_distance_squared(
 	return distance_squared;
 }
 
-static boolean sound_preempts_sound(
-	long challenger_sound_index,
-	long champion_sound_index,
-	real challenger_distance_squared)
-{
-	struct sound_datum *challenger_sound = sound_get(challenger_sound_index);
-	struct sound_definition *challenger_definition =
-		sound_definition_get(challenger_sound->definition_index);
-	struct sound_datum *champion_sound = sound_get(champion_sound_index);
-	struct sound_definition *champion_definition =
-		sound_definition_get(champion_sound->definition_index);
-
-	match_assert(
-		"c:\\halo\\SOURCE\\sound\\sound_manager.c",
-		0x763,
-		challenger_sound_index!=champion_sound_index);
-
-	return
-		sound_class_get(challenger_definition->sound_class)->priority >
-			sound_class_get(champion_definition->sound_class)->priority ||
-		(sound_class_get(challenger_definition->sound_class)->priority ==
-			sound_class_get(champion_definition->sound_class)->priority &&
-			challenger_distance_squared < source_distance_squared(
-				(word)champion_sound->listener_index,
-				&champion_sound->source));
-}
-
 static short sound_find_best_channel(
 	long sound_index)
 {
@@ -2104,7 +2073,10 @@ static short sound_find_best_channel(
 	real sound_distance_squared = source_distance_squared(
 		sound->listener_index,
 		source);
-	real best_sound_distance_squared;
+	real best_sound_distance_squared = 0.f;
+	short sound_priority = 0;
+	short best_sound_priority = 0;
+	boolean sound_priority_valid = FALSE;
 	short channel_index;
 
 	for (
@@ -2114,36 +2086,67 @@ static short sound_find_best_channel(
 	{
 		struct sound_channel_datum *channel = channel_get(channel_index);
 
-		if (sound_valid_for_channel(
+		if (!sound_valid_for_channel(
 				definition->compression,
 				definition->encoding,
 				definition->sample_rate,
 				sound->source.spatialization_mode,
 				channel->type_flags))
 		{
-			if (channel->sound_index == NONE)
-			{
-				return channel_index;
-			}
+			continue;
+		}
+		long other_sound_index = channel->sound_index;
+		if (other_sound_index == NONE)
+		{
+			return channel_index;
+		}
 
-			if (sound_preempts_sound(
-					sound_index,
-					channel->sound_index,
-					sound_distance_squared) &&
-				(best_channel_index == NONE ||
-					sound_preempts_sound(
-						best_sound_index,
-						channel->sound_index,
-						best_sound_distance_squared)))
-			{
-				struct sound_datum *other_sound = sound_get(channel->sound_index);
+		match_assert(
+			"c:\\halo\\SOURCE\\sound\\sound_manager.c",
+			0x763,
+			sound_index!=other_sound_index);
+		if (!sound_priority_valid)
+		{
+			sound_priority = sound_class_get(definition->sound_class)->priority;
+			sound_priority_valid = TRUE;
+		}
+		struct sound_datum *other_sound = sound_get(other_sound_index);
+		short other_sound_priority = sound_class_get(
+			sound_definition_get(other_sound->definition_index)->sound_class)->priority;
+		if (other_sound_priority > sound_priority)
+		{
+			continue;
+		}
 
-				best_channel_index = channel_index;
-				best_sound_index = channel->sound_index;
-				best_sound_distance_squared = source_distance_squared(
-					other_sound->listener_index,
-					&other_sound->source);
-			}
+		boolean compare_challenger_distance = other_sound_priority == sound_priority;
+		boolean replace_by_priority = best_channel_index == NONE ||
+			other_sound_priority < best_sound_priority;
+		boolean compare_victim_distance = other_sound_priority == best_sound_priority;
+		if (!compare_challenger_distance && !replace_by_priority && !compare_victim_distance)
+		{
+			continue;
+		}
+
+		/* Both comparisons and the next victim comparison can reuse this distance. */
+		real other_sound_distance_squared = source_distance_squared(
+			other_sound->listener_index,
+			&other_sound->source);
+		if (compare_challenger_distance &&
+			!(sound_distance_squared < other_sound_distance_squared))
+		{
+			continue;
+		}
+		match_assert(
+			"c:\\halo\\SOURCE\\sound\\sound_manager.c",
+			0x763,
+			best_sound_index!=other_sound_index);
+		if (replace_by_priority ||
+			(compare_victim_distance && best_sound_distance_squared < other_sound_distance_squared))
+		{
+			best_channel_index = channel_index;
+			best_sound_index = other_sound_index;
+			best_sound_priority = other_sound_priority;
+			best_sound_distance_squared = other_sound_distance_squared;
 		}
 	}
 

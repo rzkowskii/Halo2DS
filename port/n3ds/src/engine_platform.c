@@ -10,6 +10,7 @@
 #include "engine_allocation_profile.h"
 #include "engine_diagnostics.h"
 #include "engine_renderer.h"
+#include "engine_state_path.h"
 
 #ifdef HALO_N3DS_ALLOCATION_PROFILE
 #include "engine_allocation_profile.inl"
@@ -71,7 +72,11 @@ int n3ds_platform_is_new_2ds_xl(void)
 #endif
 float n3ds_platform_3d_slider(void)
 {
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    return 0.f; /* All paired GPU phases use one native-resolution view. */
+#else
     return n3ds_platform_stereo_supported()?osGet3DSliderState():0.f;
+#endif
 }
 int n3ds_input_platform_original_model(void)
 {
@@ -117,7 +122,7 @@ void n3ds_state_flush(void *pointer, unsigned int bytes) {
 int n3ds_state_make_directory(void)
 {
     if (mkdir("sdmc:/halo-source", 0777) && errno != EEXIST) return -1;
-    if (mkdir("sdmc:/halo-source/state", 0777) && errno != EEXIST) return -1;
+    if (mkdir(N3DS_STATE_ROOT, 0777) && errno != EEXIST) return -1;
     return 0;
 }
 
@@ -209,7 +214,7 @@ static void stall_watch(void *unused)
         if(stall_stage && at!=reported && now-at>5U*SYSCLOCK_ARM11) {
             const char *stage=stall_stage;u32 frame=stall_frame;int game_time=stall_game_time;
             if(at!=stall_tick) continue;
-            FILE *file=fopen("sdmc:/halo-source-stall.log","a");
+            FILE *file=fopen(N3DS_STALL_LOG,"a");
             if(file) {
                 fprintf(file,"Frame progress stalled >5s: frame=%lu time=%d stage=%s (may be slow I/O, not necessarily a crash)\n",(unsigned long)frame,game_time,stage);
                 fclose(file);

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <errno.h>
 #include <ctype.h>
+#include "engine_state_path.h"
 
 int _strnicmp(const char *left, const char *right, size_t count)
 {
@@ -107,7 +108,7 @@ int halo_n3ds_printf(const char *format, ...)
     va_end(args); return result;
 }
 
-static int translate_path(const char *path, char *out, size_t capacity)
+static int translate_path(const char *path, char *out, size_t capacity, int write)
 {
     const char *base = "sdmc:/halo-source/", *relative = path;
     size_t i, length;
@@ -115,11 +116,18 @@ static int translate_path(const char *path, char *out, size_t capacity)
     if (!strncmp(path, base, strlen(base))) relative += strlen(base);
     else if (path[1] == ':') {
         int drive = tolower((unsigned char)path[0]);
-        if (drive == 'z' || drive == 'e') base = "sdmc:/halo-source/state/";
+        if (drive == 'z' || drive == 'e') base = N3DS_STATE_ROOT "/";
         else if (drive != 'd') { errno = ENOENT; return -1; }
         relative += 2;
         while (*relative == '\\' || *relative == '/') ++relative;
     } else if (*path == '/' || *path == '\\') { errno = EINVAL; return -1; }
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    /* Legacy engine debug files use the game-data drive. Give diagnostic
+     * writes their own root while leaving reads of assets on that drive. */
+    if (write) base = N3DS_STATE_ROOT "/";
+#else
+    (void)write;
+#endif
     length = strlen(base);
     if (strlen(relative) >= capacity - length) { errno = ENAMETOOLONG; return -1; }
     memcpy(out, base, length);
@@ -137,22 +145,25 @@ static int translate_path(const char *path, char *out, size_t capacity)
 FILE *halo_n3ds_fopen(const char *path, const char *mode)
 {
     char translated[1024];
-    return translate_path(path, translated, sizeof(translated)) ? NULL : fopen(translated, mode);
+    return translate_path(path, translated, sizeof(translated), strpbrk(mode,"wa+") != NULL) ?
+        NULL : fopen(translated, mode);
 }
 FILE *halo_n3ds_freopen(const char *path, const char *mode, FILE *stream)
 {
     char translated[1024];
     if (!path) return freopen(NULL, mode, stream);
-    return translate_path(path, translated, sizeof(translated)) ? NULL : freopen(translated, mode, stream);
+    return translate_path(path, translated, sizeof(translated), strpbrk(mode,"wa+") != NULL) ?
+        NULL : freopen(translated, mode, stream);
 }
 int halo_n3ds_remove(const char *path)
 {
     char translated[1024];
-    return translate_path(path, translated, sizeof(translated)) ? -1 : remove(translated);
+    return translate_path(path, translated, sizeof(translated), 1) ? -1 : remove(translated);
 }
 int halo_n3ds_rename(const char *old_path, const char *new_path)
 {
     char old_name[1024], new_name[1024];
-    if (translate_path(old_path, old_name, sizeof(old_name)) || translate_path(new_path, new_name, sizeof(new_name))) return -1;
+    if (translate_path(old_path, old_name, sizeof(old_name), 1) ||
+        translate_path(new_path, new_name, sizeof(new_name), 1)) return -1;
     return rename(old_name, new_name);
 }

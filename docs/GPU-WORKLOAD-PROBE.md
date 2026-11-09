@@ -45,3 +45,40 @@ additional attribution before deciding on a fix.
 Use this run for diagnosis only. Validate a selected optimization against
 the regular launcher, with both launchers rendering the same full-quality
 view, before making a performance claim.
+
+Add `--probe-neutral-model-tint` to compare the regular view against a
+model material path that bypasses two combiner operations when a lit
+multipurpose material has white RGB tint. Detail, emission, reflection,
+alpha testing and decal blending still use the original inputs and
+stage order. The five phases alternate reference and candidate. Compare
+both candidate queue medians with their neighboring reference medians.
+`GPU PROBE MODEL TINT` reports the per-frame ranges for eligible and
+bypassed model parts. This variant writes `halo-neutral-model-tint.log`.
+
+Use `--probe-world-pixel-passes` with `--fixed-world-width 400 --gpu-probe`
+to split the 3D work into sky, opaque terrain, models (including the weapon),
+late effects and sorted transparent draws, and coronas. The probe alternates
+six full-render references with five one-pixel scissor phases. Each phase
+collects 12 queues. Top and bottom overlays, offscreen work, clears and
+transfers keep their normal scope. The output is `halo-world-pixel-passes.log`.
+Compare each clipped queue median with the two adjacent reference medians.
+The deltas include interactions with later depth and blend tests, so adding
+them does not give an independent per-pass budget.
+
+Use `--probe-late-sky` with `--fixed-world-width 400 --gpu-probe` to
+alternate the regular sky with a sky draw after the weapon and terrain.
+The candidate marks opaque terrain in stencil and keeps sky animation and
+flare preparation in the original phase. It retains the regular order for
+active camouflage and weapons with immediate blended materials. Equip the
+pistol before pausing at the A30 dropship. Both candidate phases must report
+`GPU PROBE LATE SKY` with `applied=1..1` for a timing comparison.
+The output is `halo-late-sky.log`.
+
+Use `--probe-opaque-terrain-alpha` with `--fixed-world-width 400 --gpu-probe`
+to compare bypassing redundant alpha tests on bump-mapped terrain. The
+candidate checks the bound base texture's immutable revision, all mip
+levels and sampler addressing. It leaves genuine cutouts and border
+sampling on the regular path. Both phases check eligibility so the
+comparison isolates the GPU test. The output is
+`halo-opaque-terrain-alpha.log`. Check the bypass count and adjacent
+reference medians before interpreting a timing difference.

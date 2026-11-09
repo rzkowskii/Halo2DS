@@ -664,6 +664,12 @@
       "defines": ["CITRO3D_BUILD"]
     },
     {
+      "source": "port/n3ds/src/engine_citro3d_uniforms.c",
+      "compiler": "gcc",
+      "citro3d_uniform_adapter": true,
+      "defines": ["CITRO3D_BUILD"]
+    },
+    {
       "source": "port/n3ds/src/engine_gpu_programs.c",
       "compiler": "gcc"
     },

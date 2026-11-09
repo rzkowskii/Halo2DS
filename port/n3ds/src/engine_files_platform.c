@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include "engine_files.h"
+#include "engine_state_path.h"
 
 enum { FILE_SLOTS=64, SEARCH_DEPTH=8, NATIVE_PATH=512 };
 struct native_open_file { FILE *stream; unsigned int generation, permissions; char path[NATIVE_PATH]; };
@@ -49,9 +50,9 @@ int n3ds_file_resolve(const char *path, char *out, unsigned int capacity, int wr
     drive=path[0]; if (drive>='A' && drive<='Z') drive+='a'-'A';
     switch (drive) {
     case 'd': if (write) return 0; root="sdmc:/halo-source"; break;
-    case 'z': root="sdmc:/halo-source/state/cache"; break;
-    case 'u': root="sdmc:/halo-source/state/saves"; break;
-    case 't': root="sdmc:/halo-source/state/title"; break;
+    case 'z': root=N3DS_STATE_ROOT "/cache"; break;
+    case 'u': root=N3DS_STATE_ROOT "/saves"; break;
+    case 't': root=N3DS_STATE_ROOT "/title"; break;
     default: return 0;
     }
     used=strlen(root);
@@ -83,8 +84,8 @@ invalid:
 }
 static int make_roots(void)
 {
-    static const char *roots[]={"sdmc:/halo-source","sdmc:/halo-source/state",
-        "sdmc:/halo-source/state/cache","sdmc:/halo-source/state/saves","sdmc:/halo-source/state/title"};
+    static const char *roots[]={"sdmc:/halo-source",N3DS_STATE_ROOT,
+        N3DS_STATE_ROOT "/cache",N3DS_STATE_ROOT "/saves",N3DS_STATE_ROOT "/title"};
     unsigned int i;
     for (i=0;i<sizeof(roots)/sizeof(*roots);++i) {
         struct stat st;
@@ -109,7 +110,7 @@ static unsigned int n3ds_files_open_count_locked(void)
 {
     unsigned int i,n=0; for(i=0;i<FILE_SLOTS;++i) n+=files[i].stream!=NULL; return n;
 }
-static unsigned int n3ds_file_open_locked(const char *path, unsigned int permissions)
+static unsigned int n3ds_file_open_locked(const char *path, unsigned int permissions, void *buffer, unsigned int size)
 {
     char native[NATIVE_PATH]; unsigned int i;
     FILE *stream;
@@ -121,6 +122,7 @@ static unsigned int n3ds_file_open_locked(const char *path, unsigned int permiss
     /* OPEN_EXISTING semantics, with append meaning an initial seek only. */
     stream=fopen(native,(permissions&2) ? "r+b" : "rb");
     if(!stream) return 0;
+    if(buffer && size) setvbuf(stream,buffer,_IOFBF,size);
     if((permissions&4) && fseek(stream,0,SEEK_END)) { fclose(stream); return 0; }
     files[i].stream=stream; files[i].permissions=permissions; ++files[i].generation;
     strcpy(files[i].path,native);
@@ -274,7 +276,9 @@ int n3ds_file_valid(unsigned int handle)
 unsigned int n3ds_files_open_count(void)
 { n3ds_files_lock(); unsigned int result=n3ds_files_open_count_locked(); n3ds_files_unlock(); return result; }
 unsigned int n3ds_file_open(const char *path, unsigned int permissions)
-{ n3ds_files_lock(); unsigned int result=n3ds_file_open_locked(path,permissions); n3ds_files_unlock(); return result; }
+{ return n3ds_file_open_with_buffer(path,permissions,NULL,0); }
+unsigned int n3ds_file_open_with_buffer(const char *path, unsigned int permissions, void *buffer, unsigned int size)
+{ n3ds_files_lock(); unsigned int result=n3ds_file_open_locked(path,permissions,buffer,size); n3ds_files_unlock(); return result; }
 int n3ds_file_close(unsigned int handle)
 { n3ds_files_lock(); int result=n3ds_file_close_locked(handle); n3ds_files_unlock(); return result; }
 int n3ds_file_read(unsigned int handle, void *buffer, unsigned int size)

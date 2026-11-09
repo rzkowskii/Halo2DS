@@ -216,6 +216,31 @@ struct shader_model_definition
 	real translucency;
 };
 
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+boolean n3ds_first_person_model_allows_late_sky(long model_index)
+{
+	if (model_index == NONE) return TRUE;
+	struct model *model = model_definition_get(model_index);
+	if (!model) return FALSE;
+	for (long i = 0; i < model->shaders.count; ++i)
+	{
+		struct model_shader_reference *reference =
+			TAG_BLOCK_GET_ELEMENT(&model->shaders, i, struct model_shader_reference);
+		if (reference->shader.index == NONE) return FALSE;
+		struct shader *shader = shader_definition_get(reference->shader.index);
+		if (!shader) return FALSE;
+		if (shader->base.type == _shader_type_model)
+		{
+			struct shader_model_definition *material = (struct shader_model_definition *)shader;
+			if (TEST_FLAG(material->flags, _shader_model_alpha_blended_decal_bit)) return FALSE;
+		}
+		else if (!shader_type_is_transparent(shader->base.type) || shader_is_decal(shader))
+			return FALSE;
+	}
+	return TRUE;
+}
+#endif
+
 struct rasterizer_model_skinning
 {
 	real_matrix4x3 const *node_matrices;

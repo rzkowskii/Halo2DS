@@ -213,6 +213,7 @@ void n3ds_engine_input_sample(const struct native_input_sample *sample)
             touch_handler(sample->touch_x,sample->touch_y):0;
         if(action&NATIVE_TOUCH_GRENADE) pressed|=1u<<_gamepad_analog_button_black;
         if(action&NATIVE_TOUCH_FLASHLIGHT) pressed|=1u<<_gamepad_analog_button_white;
+        if(gameplay_controls && (action&NATIVE_TOUCH_MELEE)) pressed|=1u<<_gamepad_analog_button_b;
         if(gameplay_controls && (action&NATIVE_TOUCH_JUMP)) touch_jump_begin(sample->touch_x,sample->touch_y);
         else n3ds_input_cancel_touch_actions();
         touch_reload=gameplay_controls && (action&NATIVE_TOUCH_RELOAD);

@@ -62,10 +62,11 @@ int n3ds_chicago_program(struct native_generic_material *,int maps,const int col
  * callers must still reacquire a handle after each waited FrameBegin.
  * Vertex-dependent combiner inputs are deliberately rejected by validation. */
 void *n3ds_gpu_generic_bake(const struct native_generic_material *m,const float bounds[4]);
+void *n3ds_gpu_chicago_bake(const struct native_generic_material *m,const float bounds[4],int sky);
 /* Optional-frame preflight using the same complete key as the bake cache.
  * kind: 0 generic, 1 meter, 2 shield, 3 hologram stream. Never loads, allocates,
  * ages entries or changes texture state; a midpoint miss marks rejection. */
-int n3ds_gpu_generic_bake_preflight(const struct native_generic_material *,const float bounds[4],int kind);
+int n3ds_gpu_generic_bake_preflight(const struct native_generic_material *,const float bounds[4],int kind,int sky);
 void *n3ds_gpu_meter_bake(const struct native_generic_material *m,const float bounds[4]);
 /* RGBA: min(value), max(flash-width), flash(extension), background, tint. */
 void n3ds_meter_program(struct native_generic_material *m,const float constants[5][4],int negative_flash);

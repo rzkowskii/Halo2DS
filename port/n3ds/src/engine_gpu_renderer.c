@@ -1,11 +1,15 @@
 #include <3ds.h>
 #include <citro3d.h>
+#ifdef HALO_N3DS_COMPACT_EFFECT_COMMANDS
+#include "internal.h"
+#endif
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include "engine_renderer.h"
 #include "engine_gpu_model_layout.h"
+#include "engine_model_clip_bounds.h"
 #include "engine_algorithm_profile.h"
 #include "engine_dependency_trace.h"
 #include "engine_presentation.h"
@@ -103,12 +107,37 @@ int n3ds_gpu_diagnostic_mode(void)
 #endif
     return diagnostic_mode;
 }
+#ifdef HALO_N3DS_PROBE_PIXEL_PASSES
+static int gpu_probe_pixel_clip(void)
+{
+    if (!gpu_probe.recording) return 0;
+    int mode = probe_modes[gpu_probe.phase];
+    if (bottom_selected) return mode == NATIVE_GPU_PIXEL_BOTTOM;
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    /* The combined probe also marks individual world passes within the
+     * original broad scene phase. Keep its scissor across those markers. */
+    if (mode == NATIVE_GPU_PIXEL_SCENE) return gpu_probe.pixel_pass != NATIVE_GPU_PIXEL_TOP_OVERLAY;
+#endif
+    return mode == gpu_probe.pixel_pass;
+}
+
+void n3ds_gpu_probe_pixel_pass(enum native_gpu_pixel_pass pass)
+{
+    if (!gpu_probe.recording) return;
+    int was_clipped = gpu_probe_pixel_clip();
+    gpu_probe.pixel_pass = pass;
+    int clipped = gpu_probe_pixel_clip();
+    if (clipped != was_clipped)
+        C3D_SetScissor(clipped ? GPU_SCISSOR_NORMAL : GPU_SCISSOR_DISABLE, 0, 0, 1, 1);
+}
+#endif
 #ifdef HALO_N3DS_PRESENT_INTERPOLATION
 enum { TOP_REFRESH_TICKS = 4481136 };
 static enum { MIDPOINT_IDLE, MIDPOINT_RESERVED, MIDPOINT_RENDERING } midpoint_state;
 static u32 top_swap_sequence, top_swap_wait_for;
 static int swap_tracking_enabled;
 static int midpoint_submitted, midpoint_visible_before_keyframe;
+static long long midpoint_swap_deadline;
 static u32 top_submit_tick, top_submit_kind, completed_present_ticks[2];
 static u32 top_posted_kind, top_acknowledged_sequence, keyframe_latches;
 
@@ -165,9 +194,13 @@ static int top_swap_visible(void)
 
 unsigned int n3ds_gpu_keyframe_latches(void) { return keyframe_latches; }
 
-static int wait_for_top_swap(void)
+int n3ds_gpu_midpoint_prior_swap_pending(void)
 {
-    const long long deadline = (long long)svcGetSystemTick() + TOP_REFRESH_TICKS;
+    return top_swap_posted() && gspIsPresentPending(GFX_TOP);
+}
+
+static int wait_for_top_swap(long long deadline)
+{
     while (gspHasGpuRight()) {
         if (top_swap_visible())
             return 1;
@@ -234,7 +267,8 @@ void n3ds_gpu_hud_screen(int bottom)
         C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_COLOR & ~GPU_WRITE_ALPHA);
         C3D_StencilTest(false,GPU_ALWAYS,0,255,255);
     }
-    C3D_SetScissor(n3ds_gpu_diagnostic_mode()==1 && !bottom_selected?GPU_SCISSOR_NORMAL:GPU_SCISSOR_DISABLE,0,0,120,200);
+    if(n3ds_gpu_diagnostic_mode()==1 && !bottom_selected)
+        C3D_SetScissor(GPU_SCISSOR_NORMAL,0,0,120,200);
 }
 void n3ds_gpu_hud_screen_restore(void)
 { surface_state_mode=0;world_target_bind(); }
@@ -249,6 +283,194 @@ static struct vertex_buffer_binding bound_vertex[2];
 static unsigned int bound_vertex_count;
 static int bound_vertex_valid;
 static unsigned long long vertex_buffer_requests,vertex_buffer_reuses;
+#ifdef HALO_N3DS_COMPACT_VERTEX_COMMANDS
+static struct {
+    const u32 *list;
+    u32 end,base;
+    unsigned int compact,full;
+} vertex_commands;
+void __real_C3Di_BufInfoBind(C3D_BufInfo *info);
+void __wrap_C3Di_BufInfoBind(C3D_BufInfo *info)
+{
+    /* Successful native binds own two slots and leave slots 2–11 zero.
+     * Publish the full state at the first bind in each command list.
+     * Keep both native slots in subsequent packets, including the zero
+     * descriptor when switching back from two streams to one. */
+    int owned=frame_active && bound_vertex_valid && gpuCmdBuf;
+    if(owned && vertex_commands.list==gpuCmdBuf && gpuCmdBufOffset>=vertex_commands.end) {
+        u32 base=info->base_paddr>>3;
+        if(base!=vertex_commands.base) GPUCMD_AddWrite(GPUREG_ATTRIBBUFFERS_LOC,base);
+        GPUCMD_AddIncrementalWrites(GPUREG_ATTRIBBUFFER0_OFFSET,(const u32 *)info->buffers,6);
+        ++vertex_commands.compact;
+    } else {
+        __real_C3Di_BufInfoBind(info);
+        ++vertex_commands.full;
+    }
+    vertex_commands.list=owned?gpuCmdBuf:NULL;
+    vertex_commands.end=gpuCmdBufOffset;
+    vertex_commands.base=info->base_paddr>>3;
+}
+#endif
+#ifdef HALO_N3DS_COMPACT_TEV_COMMANDS
+_Static_assert(sizeof(C3D_TexEnv)==5*sizeof(u32),"Citro3D emits five words per TEV stage");
+static struct {
+    const u32 *list;
+    u32 end;
+    unsigned int valid, full, elided;
+    C3D_TexEnv stages[6];
+} tev_commands;
+
+void __real_C3Di_TexEnvBind(int stage,C3D_TexEnv *env);
+void __wrap_C3Di_TexEnvBind(int stage,C3D_TexEnv *env)
+{
+    u32 offset=gpuCmdBufOffset;
+    if(!frame_active || !gpuCmdBuf || (unsigned int)stage>=6 ||
+        offset>gpuCmdBufSize || gpuCmdBufSize-offset<6) {
+        tev_commands.list=NULL;
+        __real_C3Di_TexEnvBind(stage,env);
+        return;
+    }
+    /* This shadows writes recorded in the current list. A split, rewind or
+     * fresh frame requires the stock write even when the packet matches. */
+    if(tev_commands.list!=gpuCmdBuf || offset<tev_commands.end) {
+        tev_commands.list=gpuCmdBuf;
+        tev_commands.valid=0;
+    }
+    unsigned int mask=1u<<stage;
+    u32 *installed=(u32 *)&tev_commands.stages[stage];
+    const u32 *desired=(const u32 *)env;
+    if((tev_commands.valid&mask) && installed[0]==desired[0] &&
+        installed[1]==desired[1] && installed[2]==desired[2] &&
+        installed[3]==desired[3] && installed[4]==desired[4]) {
+        ++tev_commands.elided;
+        return;
+    }
+    /* Same six words as the pinned SDK's five-value incremental write.
+     * The fixed-size packet avoids its generic command loop and copy. */
+    unsigned int reg=GPUREG_TEXENV0_SOURCE+(stage+(stage>=4?2:0))*8;
+    u32 *packet=gpuCmdBuf+offset;
+    packet[0]=desired[0];
+    packet[1]=GPUCMD_HEADER(1u,0xfu,reg)|(4u<<20);
+    packet[2]=desired[1];
+    packet[3]=desired[2];
+    packet[4]=desired[3];
+    packet[5]=desired[4];
+    tev_commands.stages[stage]=*env;
+    tev_commands.valid|=mask;
+    ++tev_commands.full;
+    gpuCmdBufOffset=tev_commands.end=offset+6;
+}
+#endif
+#ifdef HALO_N3DS_COMPACT_EFFECT_COMMANDS
+enum { EFFECT_PACKET_WORDS = 34 };
+static struct {
+    const u32 *list;
+    u32 end;
+    unsigned int binds, elided_words;
+    C3D_Effect state;
+} effect_commands;
+
+static inline u32 *effect_register(u32 *out, u32 reg, u32 mask, u32 value)
+{
+    out[0]=value;
+    out[1]=GPUCMD_HEADER(0u,mask,reg);
+    return out+2;
+}
+
+void __real_C3Di_EffectBind(C3D_Effect *effect);
+void __wrap_C3Di_EffectBind(C3D_Effect *effect)
+{
+    u32 offset=gpuCmdBufOffset;
+    if(!frame_active || !gpuCmdBuf || offset>gpuCmdBufSize ||
+        gpuCmdBufSize-offset<EFFECT_PACKET_WORDS) {
+        effect_commands.list=NULL;
+        __real_C3Di_EffectBind(effect);
+        return;
+    }
+    const C3D_Effect *old=&effect_commands.state;
+    int full=effect_commands.list!=gpuCmdBuf || offset<effect_commands.end;
+    u32 *out=gpuCmdBuf+offset;
+    if(full || effect->zBuffer!=old->zBuffer)
+        out=effect_register(out,GPUREG_DEPTHMAP_ENABLE,15,effect->zBuffer);
+    if(full || (effect->cullMode&3)!=(old->cullMode&3))
+        out=effect_register(out,GPUREG_FACECULLING_CONFIG,15,effect->cullMode&3);
+    if(full || effect->zScale!=old->zScale || effect->zOffset!=old->zOffset) {
+        out[0]=effect->zScale;
+        out[1]=GPUCMD_HEADER(1u,15,GPUREG_DEPTHMAP_SCALE)|(1u<<20);
+        out[2]=effect->zOffset;
+        out[3]=0;
+        out+=4;
+    }
+    if(full || effect->alphaTest!=old->alphaTest || effect->stencilMode!=old->stencilMode ||
+        effect->stencilOp!=old->stencilOp || effect->depthTest!=old->depthTest) {
+        out[0]=effect->alphaTest;
+        out[1]=GPUCMD_HEADER(1u,15,GPUREG_FRAGOP_ALPHA_TEST)|(3u<<20);
+        out[2]=effect->stencilMode;
+        out[3]=effect->stencilOp;
+        out[4]=effect->depthTest;
+        out[5]=0;
+        out+=6;
+    }
+    out=effect_register(out,GPUREG_GAS_DELTAZ_DEPTH,8,(u32)GPU_MAKEGASDEPTHFUNC((effect->depthTest>>4)&7)<<24);
+    if(full || effect->blendClr!=old->blendClr)
+        out=effect_register(out,GPUREG_BLEND_COLOR,15,effect->blendClr);
+    if(full || effect->alphaBlend!=old->alphaBlend)
+        out=effect_register(out,GPUREG_BLEND_FUNC,15,effect->alphaBlend);
+    if(full || effect->clrLogicOp!=old->clrLogicOp)
+        out=effect_register(out,GPUREG_LOGIC_OP,15,effect->clrLogicOp);
+    if(full || ((effect->fragOpMode^old->fragOpMode)&0xffffffu))
+        out=effect_register(out,GPUREG_COLOR_OPERATION,7,effect->fragOpMode);
+    /* Retain the SDK's special fragment and early-depth writes on every bind. */
+    out=effect_register(out,GPUREG_FRAGOP_SHADOW,15,effect->fragOpShadow);
+    out=effect_register(out,GPUREG_EARLYDEPTH_TEST1,1,effect->earlyDepth);
+    out=effect_register(out,GPUREG_EARLYDEPTH_TEST2,15,effect->earlyDepth);
+    out=effect_register(out,GPUREG_EARLYDEPTH_FUNC,1,effect->earlyDepthFunc);
+    out=effect_register(out,GPUREG_EARLYDEPTH_DATA,7,effect->earlyDepthRef);
+
+    effect_commands.state=*effect;
+    effect_commands.list=gpuCmdBuf;
+    gpuCmdBufOffset=effect_commands.end=(u32)(out-gpuCmdBuf);
+    effect_commands.elided_words+=EFFECT_PACKET_WORDS-(gpuCmdBufOffset-offset);
+    ++effect_commands.binds;
+}
+#endif
+#ifdef HALO_N3DS_COMPACT_SHADER_UPLOADS
+static struct {
+    const u32 *list;
+    const DVLP_s *binary;
+    u32 end;
+    unsigned int uploaded, elided;
+} shader_uploads;
+
+Result __real_shaderProgramConfigure(shaderProgram_s *program,bool send_vertex,bool send_geometry);
+Result __wrap_shaderProgramConfigure(shaderProgram_s *program,bool send_vertex,bool send_geometry)
+{
+    const DVLE_s *entry=program && program->vertexShader?program->vertexShader->dvle:NULL;
+    if(!frame_active || !gpuCmdBuf || !entry || entry->type!=VERTEX_SHDR || program->geometryShader) {
+        shader_uploads.list=NULL;
+        return __real_shaderProgramConfigure(program,send_vertex,send_geometry);
+    }
+    if(shader_uploads.list!=gpuCmdBuf || gpuCmdBufOffset<shader_uploads.end) {
+        shader_uploads.list=gpuCmdBuf;
+        shader_uploads.binary=NULL;
+    }
+    /* A pending bind can be superseded before a draw. Keep the SDK's
+     * entry point, outmap and uniforms, and skip only a known code upload. */
+    int reuse=send_vertex && shader_uploads.binary && shader_uploads.binary==entry->dvlp;
+    Result result=__real_shaderProgramConfigure(program,send_vertex && !reuse,send_geometry);
+    if(R_SUCCEEDED(result)) {
+        if(reuse) ++shader_uploads.elided;
+        else if(send_vertex) {
+            shader_uploads.binary=entry->dvlp;
+            ++shader_uploads.uploaded;
+        }
+        shader_uploads.end=gpuCmdBufOffset;
+    } else {
+        shader_uploads.list=NULL;
+    }
+    return result;
+}
+#endif
 static C3D_AttrInfo model_attributes[2],water_wave_attributes;
 static C3D_TexEnv world_texture_recipe[6];
 static void renderer_layouts_initialize(void)
@@ -441,6 +663,8 @@ static struct model_light_components {
     int enabled,values_valid;
 } model_cached_lights[3];
 static int model_light_ready,model_light_valid;
+static struct native_model_lighting model_lighting_inputs;
+static u32 model_translucency_bits;
 static unsigned long long model_lit_draws,model_light_updates,model_reflection_draws,model_detail_draws;
 static int model_light_apply(unsigned int index,int enabled,const float color[3],const float direction[3],int write_values)
 {
@@ -465,6 +689,16 @@ static int model_light_apply(unsigned int index,int enabled,const float color[3]
 }
 static void model_lighting_apply(const struct native_model_lighting *lighting,float translucency)
 {
+    u32 translucency_bits;
+    memcpy(&translucency_bits,&translucency,sizeof(translucency_bits));
+    if(model_light_valid && model_translucency_bits==translucency_bits &&
+       !memcmp(&model_lighting_inputs,lighting,sizeof(model_lighting_inputs))) {
+        /* The SDK environment still needs binding after a different light
+         * owner or a frame reset. Skip only the component calculations. */
+        native_light_env_bind(&model_light_env);
+        return;
+    }
+
     int changed=0;
     if(!model_light_valid || memcmp(model_cached_ambient,lighting->ambient,sizeof(model_cached_ambient))) {
         C3D_LightEnvAmbient(&model_light_env,lighting->ambient[0],lighting->ambient[1],lighting->ambient[2]);
@@ -486,11 +720,14 @@ static void model_lighting_apply(const struct native_model_lighting *lighting,fl
     const float back_color[3]={back?c[0]*translucency:0,back?c[1]*translucency:0,back?c[2]*translucency:0};
     const float back_direction[3]={back?-d[0]:0,back?-d[1]:0,back?-d[2]:0};
     changed|=model_light_apply(2,back,back_color,back_direction,back);
+    model_lighting_inputs=*lighting;
+    model_translucency_bits=translucency_bits;
     model_light_valid=1;
     if(changed)++model_light_updates;
     native_light_env_bind(&model_light_env);
 }
 static int model_batch_active,model_state_valid,model_state_key;
+enum { MODEL_NEUTRAL_TINT = 1 << 7 };
 static unsigned int model_cached_nodes;
 static float model_cached_rows[NATIVE_GPU_MODEL_BONES*12],model_cached_options[4];
 static unsigned long long model_state_reuses,model_palette_reuses,model_palette_uploads;
@@ -631,6 +868,9 @@ static unsigned int index_draws,index_flushes;
 enum { RESIDENT_INDEX_BYTES = 256 * 1024, RESIDENT_INDEX_HEADROOM = 4 * 1024 * 1024 };
 static unsigned char *resident_index_stream;
 static unsigned int resident_index_used, resident_index_uploads, resident_index_peak;
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+static unsigned int byte_index_draws,byte_index_elements,byte_index_uploads,byte_index_uploaded_bytes;
+#endif
 static int resident_indices_enabled, resident_indices_suspended;
 static unsigned long long resident_index_epoch = 1;
 #ifdef HALO_N3DS_PERFORMANCE_PROFILE
@@ -761,6 +1001,14 @@ static struct native_render_camera current_camera;
 static struct { float key[11];C3D_Mtx matrix;int valid; } sky_projection_cache[2];
 #include "engine_flashlight.inl"
 static C3D_Mtx current_projection,current_model_projection;
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+static struct n3ds_model_clip_view current_model_clip_view;
+
+const struct n3ds_model_clip_view *n3ds_gpu_model_clip_view(void)
+{
+    return &current_model_clip_view;
+}
+#endif
 static struct native_render_camera first_person_world_camera;
 static int first_person_active,first_person_mask;
 static long long frame_wait_ticks;
@@ -833,8 +1081,16 @@ void n3ds_gpu_algorithm_profile_finish(void)
 #ifdef HALO_N3DS_PERFORMANCE_PROFILE
 static unsigned int queue_over_refresh;
 #endif
+#ifdef HALO_N3DS_A30_BENCHMARK
+static unsigned int model_uv_elements[2];
+static unsigned int basic_model_uv_elements[2];
+static unsigned int water_shader_elements, glass_shader_elements;
+#endif
 static void renderer_diagnostic_initialize(void)
 {
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    n3ds_log("GPU PROBE: scheduled automatically by startup diagnostics");
+#else
     FILE *file=fopen("sdmc:/halo-source/renderer-profile.txt","rb");char mode[32]={0};
     if(file) {fgets(mode,sizeof(mode),file);fclose(file);}
     mode[strcspn(mode,"\r\n")]=0;
@@ -844,6 +1100,7 @@ static void renderer_diagnostic_initialize(void)
 #ifdef HALO_N3DS_GPU_PROBE
     n3ds_log(diagnostic_mode ? "GPU PROBE: disabled by renderer-profile.txt" :
         "GPU PROBE: ready, press L+R while paused in a mission");
+#endif
 #endif
 }
 
@@ -867,7 +1124,10 @@ unsigned int n3ds_gpu_texture_unit_mask(void)
         !world_budget_enabled || !world_scale_fixed || world_scale || world_low_active ||
         screen_effect_active || diagnostic_mode)
         return 7;
-#ifdef HALO_N3DS_GPU_PROBE
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    if (!gpu_probe.recording || probe_modes[gpu_probe.phase] != PROBE_TEXTURE_UNITS_MODE)
+        return 7;
+#elif defined(HALO_N3DS_GPU_PROBE)
     if (gpu_probe.recording && probe_modes[gpu_probe.phase] != PROBE_TEXTURE_UNITS_MODE)
         return 7;
 #endif
@@ -897,6 +1157,9 @@ int n3ds_gpu_opaque_color_read_path(const void *color_buffer)
         diagnostic_mode)
         return 0;
 #ifdef HALO_N3DS_GPU_PROBE
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    if (!gpu_probe.recording) return 0;
+#endif
     if (gpu_probe.recording && probe_modes[gpu_probe.phase] != PROBE_OPAQUE_COLOR_MODE)
         return 1;
 #endif
@@ -933,8 +1196,45 @@ float n3ds_gpu_command_usage(void)
 }
 void n3ds_gpu_frame_sync(int enabled) { frame_sync=!!enabled; }
 long long n3ds_gpu_frame_wait_ticks(void) { return frame_wait_ticks; }
+int n3ds_gpu_model_stencil_writes(void) { return !bottom_selected && first_person_active; }
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+enum { WEAPON_STENCIL_BIT = 1, TERRAIN_STENCIL_BIT = 2 };
+static int late_sky_terrain, late_sky_mask;
+
+int n3ds_gpu_probe_late_sky(void)
+{
+    return gpu_probe.recording && probe_modes[gpu_probe.phase] == PROBE_LATE_SKY_MODE;
+}
+
+void n3ds_gpu_late_sky_mark_terrain(int enabled)
+{
+    late_sky_terrain = enabled;
+    n3ds_gpu_model_stencil_apply();
+}
+
+void n3ds_gpu_late_sky_mask(int enabled)
+{
+    late_sky_mask = enabled;
+    if(enabled && gpu_probe.recording) ++gpu_probe.draws[PROBE_LATE_SKY_APPLIED];
+    n3ds_gpu_model_stencil_apply();
+}
+#endif
 void n3ds_gpu_model_stencil_apply(void)
 {
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+    if(!bottom_selected && late_sky_mask) {
+        C3D_StencilTest(true,GPU_EQUAL,0,WEAPON_STENCIL_BIT|TERRAIN_STENCIL_BIT,0);
+        C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_KEEP,GPU_STENCIL_KEEP);
+        return;
+    }
+    if(!bottom_selected && late_sky_terrain) {
+        /* Preserve the weapon test and set terrain coverage on a surviving
+         * fragment, including one whose stored depth equals the clear value. */
+        C3D_StencilTest(true,GPU_EQUAL,TERRAIN_STENCIL_BIT,WEAPON_STENCIL_BIT,TERRAIN_STENCIL_BIT);
+        C3D_StencilOp(GPU_STENCIL_KEEP,GPU_STENCIL_KEEP,GPU_STENCIL_REPLACE);
+        return;
+    }
+#endif
     if(bottom_selected) C3D_StencilTest(false,GPU_ALWAYS,0,255,255);
     else if(first_person_active) {
         C3D_StencilTest(true,GPU_ALWAYS,1,1,1);
@@ -1072,6 +1372,38 @@ void n3ds_gpu_renderer_dispose(void)
         char line[160];snprintf(line,sizeof(line),"NATIVE VERTEX BINDINGS: cacheable_requests=%llu reused=%llu; one/two-stream layouts; same-frame descriptors only",vertex_buffer_requests,vertex_buffer_reuses);n3ds_log(line);
         vertex_buffer_requests=vertex_buffer_reuses=0;
     }
+#ifdef HALO_N3DS_COMPACT_VERTEX_COMMANDS
+    char command_report[128];
+    snprintf(command_report,sizeof(command_report),"NATIVE VERTEX COMMANDS: full=%u compact=%u",
+             vertex_commands.full,vertex_commands.compact);
+    n3ds_log(command_report);
+    memset(&vertex_commands,0,sizeof(vertex_commands));
+#endif
+#ifdef HALO_N3DS_COMPACT_TEV_COMMANDS
+    char tev_report[120];
+    snprintf(tev_report,sizeof(tev_report),"NATIVE TEV COMMANDS: full=%u elided=%u words_per_packet=6",
+        tev_commands.full,tev_commands.elided);
+    n3ds_log(tev_report);
+    memset(&tev_commands,0,sizeof(tev_commands));
+#endif
+#ifdef HALO_N3DS_COMPACT_EFFECT_COMMANDS
+    char effect_report[128];
+    snprintf(effect_report,sizeof(effect_report),"NATIVE EFFECT COMMANDS: binds=%u elided_words=%u",
+        effect_commands.binds,effect_commands.elided_words);
+    n3ds_log(effect_report);
+    memset(&effect_commands,0,sizeof(effect_commands));
+#endif
+#ifdef HALO_N3DS_COMPACT_SHADER_UPLOADS
+    char shader_report[128];
+    snprintf(shader_report,sizeof(shader_report),"NATIVE SHADER UPLOADS: full=%u elided=%u",
+        shader_uploads.uploaded,shader_uploads.elided);
+    n3ds_log(shader_report);
+    memset(&shader_uploads,0,sizeof(shader_uploads));
+#endif
+#ifdef HALO_N3DS_COMPACT_UNIFORM_UPLOADS
+    extern void n3ds_gpu_uniform_upload_report(void);
+    n3ds_gpu_uniform_upload_report();
+#endif
     bound_vertex_valid=0;
     if(model_reflection_draws) {char message[128];snprintf(message,sizeof(message),"MODEL NATIVE REFLECTIONS: draws=%llu; cube/base/mask, single pass",model_reflection_draws);n3ds_log(message);model_reflection_draws=0;}
     if(model_detail_draws) {char message[128];snprintf(message,sizeof(message),"MODEL NATIVE DETAIL: draws=%llu; detail/base/mask, single pass",model_detail_draws);n3ds_log(message);model_detail_draws=0;}
@@ -1110,6 +1442,7 @@ void n3ds_gpu_renderer_dispose(void)
     __atomic_store_n(&swap_tracking_enabled, 0, __ATOMIC_RELAXED);
     midpoint_state = MIDPOINT_IDLE;
     midpoint_submitted = midpoint_visible_before_keyframe = 0;
+    midpoint_swap_deadline = 0;
     top_swap_wait_for = __atomic_load_n(&top_swap_sequence, __ATOMIC_ACQUIRE);
     __atomic_store_n(&top_submit_kind, 0, __ATOMIC_RELAXED);
     __atomic_store_n(&top_posted_kind, 0, __ATOMIC_RELAXED);
@@ -1344,8 +1677,11 @@ static int begin_frame(int midpoint)
     BOOT_TRACE("frame begin: waiting for GPU queue");
     /* A stuck GPU must leave a durable report instead of an unexplained hang.
      * NONBLOCK only polls queue completion; buffers stay owned until it ends. */
-    const u8 flags = C3D_FRAME_NONBLOCK | (!midpoint && frame_sync ? C3D_FRAME_SYNCDRAW : 0);
-    while(!C3D_FrameBegin(flags)) {
+    const int synchronize = !midpoint && frame_sync;
+    /* SYNCDRAW would wait for a fresh VBlank on every failed queue poll.
+     * Wait once, then retry only the queue acquisition. */
+    if(synchronize) C3D_FrameSync();
+    while(!C3D_FrameBegin(C3D_FRAME_NONBLOCK)) {
         if(midpoint) {
             n3ds_trace_event(N3DS_TRACE_GPU_ACQUIRE_REJECT,midpoint,4);
             return 0;
@@ -1365,7 +1701,8 @@ static int begin_frame(int midpoint)
     frame_wait_ticks=svcGetSystemTick()-before;
     /* The first bind always installs a target, including after APT restore. */
     n3ds_gpu_framebuffer_invalidate();
-    n3ds_trace_event(N3DS_TRACE_GPU_ACQUIRE_END,midpoint,flags);
+    n3ds_trace_event(N3DS_TRACE_GPU_ACQUIRE_END,midpoint,
+        C3D_FRAME_NONBLOCK | (synchronize ? C3D_FRAME_SYNCDRAW : 0));
     n3ds_trace_gpu_poll();
 #ifdef HALO_N3DS_ALGORITHM_PROFILE
     algorithm_gpu_retire(frame_wait_ticks);
@@ -1393,11 +1730,38 @@ static int begin_frame(int midpoint)
             n3ds_log(message);
             queue_over_refresh = 0;
 #endif
+#ifdef HALO_N3DS_A30_BENCHMARK
+            snprintf(message,sizeof(message),
+                "MODEL UV WORK: frames=%u rigid_indices=%u skinned_indices=%u basic_rigid_indices=%u basic_skin_indices=%u",
+                timing_frames,model_uv_elements[0],model_uv_elements[1],
+                basic_model_uv_elements[0],basic_model_uv_elements[1]);
+            n3ds_log(message);
+            model_uv_elements[0]=model_uv_elements[1]=0;
+            basic_model_uv_elements[0]=basic_model_uv_elements[1]=0;
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+            snprintf(message,sizeof(message),
+                "MODEL BYTE INDICES: frames=%u draws=%u elements=%u uploads=%u uploaded_bytes=%u arena_used=%u",
+                timing_frames,byte_index_draws,byte_index_elements,byte_index_uploads,byte_index_uploaded_bytes,resident_index_used);
+            n3ds_log(message);
+            byte_index_draws=byte_index_elements=byte_index_uploads=byte_index_uploaded_bytes=0;
+#endif
+            if(water_shader_elements || glass_shader_elements) {
+                snprintf(message,sizeof(message),
+                    "SURFACE SHADER WORK: frames=%u water_indices=%u glass_indices=%u",
+                    timing_frames,water_shader_elements,glass_shader_elements);
+                n3ds_log(message);
+                water_shader_elements=glass_shader_elements=0;
+            }
+#endif
             timing_frames=0;timing_cpu=timing_gpu=timing_wait=0;timing_gpu_max=0;
         }
     }
 #ifdef HALO_N3DS_GPU_PROBE
     gpu_probe_begin(midpoint, frame_wait_ticks);
+#endif
+#ifdef HALO_N3DS_PROBE_TEXTURE_REBINDS
+    extern void n3ds_gpu_texture_rebind_reset(void);
+    n3ds_gpu_texture_rebind_reset();
 #endif
 #ifdef HALO_N3DS_TEXTURE_VRAM_MIRRORS
     n3ds_gpu_texture_mirror_select(texture_mirror_eligible()
@@ -1412,6 +1776,22 @@ static int begin_frame(int midpoint)
     gfxSet3D(stereo_level>0);overlay_stereo=0;
     /* FrameBegin waits for the previous command queue, so its indices can be reused. */
     bound_vertex_valid=0;
+#ifdef HALO_N3DS_COMPACT_VERTEX_COMMANDS
+    vertex_commands.list=NULL;
+#endif
+#ifdef HALO_N3DS_COMPACT_TEV_COMMANDS
+    tev_commands.list=NULL;
+#endif
+#ifdef HALO_N3DS_COMPACT_EFFECT_COMMANDS
+    effect_commands.list=NULL;
+#endif
+#ifdef HALO_N3DS_COMPACT_SHADER_UPLOADS
+    shader_uploads.list=NULL;
+#endif
+#ifdef HALO_N3DS_COMPACT_UNIFORM_UPLOADS
+    extern void n3ds_gpu_uniform_upload_reset(void);
+    n3ds_gpu_uniform_upload_reset();
+#endif
     frame_active = 1; index_used = 0; model_used = 0;bottom_selected=0;
     ++model_frame_serial;
     for(unsigned int i=0;i<MODEL_BLOCKS;++i) model_blocks[i].used=0;
@@ -1441,17 +1821,28 @@ int n3ds_gpu_frame_begin(void)
     return begin_frame(0);
 }
 #ifdef HALO_N3DS_PRESENT_INTERPOLATION
-int n3ds_gpu_midpoint_try_begin(void)
+enum n3ds_midpoint_acquire n3ds_gpu_midpoint_try_begin(long long swap_deadline)
 {
-    if(midpoint_state != MIDPOINT_IDLE || !n3ds_gpu_midpoint_compatible() ||
-       !gspHasGpuRight() || !top_swap_visible() || linearSpaceFree() < MODEL_RESIDENT_HEADROOM) {
-        n3ds_trace_event(N3DS_TRACE_GPU_ACQUIRE_REJECT,1,6);
-        return 0;
+    enum n3ds_midpoint_acquire reason;
+    if(midpoint_state != MIDPOINT_IDLE || !n3ds_gpu_midpoint_compatible())
+        reason = N3DS_MIDPOINT_ACQUIRE_CONTEXT;
+    else if(!gspHasGpuRight())
+        reason = N3DS_MIDPOINT_ACQUIRE_GPU_RIGHTS;
+    else if(!top_swap_posted())
+        reason = N3DS_MIDPOINT_ACQUIRE_SWAP_UNPOSTED;
+    else if(!top_swap_visible() && !swap_deadline)
+        reason = N3DS_MIDPOINT_ACQUIRE_SWAP_PENDING;
+    else if(linearSpaceFree() < MODEL_RESIDENT_HEADROOM)
+        reason = N3DS_MIDPOINT_ACQUIRE_HEADROOM;
+    else {
+        if(!begin_frame(1)) return N3DS_MIDPOINT_ACQUIRE_QUEUE;
+        midpoint_submitted = midpoint_visible_before_keyframe = 0;
+        midpoint_swap_deadline = swap_deadline;
+        midpoint_state = MIDPOINT_RESERVED;
+        return N3DS_MIDPOINT_ACQUIRED;
     }
-    if(!begin_frame(1)) return 0;
-    midpoint_submitted = midpoint_visible_before_keyframe = 0;
-    midpoint_state = MIDPOINT_RESERVED;
-    return 1;
+    n3ds_trace_event(N3DS_TRACE_GPU_ACQUIRE_REJECT,1,6);
+    return reason;
 }
 #endif
 struct native_render_vertex *n3ds_gpu_model_vertices_allocate(unsigned int count)
@@ -1566,7 +1957,8 @@ static void window_state_begin(const struct native_render_camera *camera)
         C3D_RenderTargetClear(world_target(), C3D_CLEAR_ALL, world_clear_color(camera->clear_color), 0);
     }
     world_target_bind();
-    C3D_SetScissor(n3ds_gpu_diagnostic_mode()==1 && !bottom_selected?GPU_SCISSOR_NORMAL:GPU_SCISSOR_DISABLE,0,0,120,200);
+    if(n3ds_gpu_diagnostic_mode()==1 && !bottom_selected)
+        C3D_SetScissor(GPU_SCISSOR_NORMAL,0,0,120,200);
 }
 void n3ds_gpu_window_begin(const struct native_render_camera *camera)
 {
@@ -1580,6 +1972,18 @@ void n3ds_gpu_window_begin(const struct native_render_camera *camera)
         FVec3_New(camera->forward[0],camera->forward[1],camera->forward[2]),
         FVec3_New(camera->up[0],camera->up[1],camera->up[2]), false);
     Mtx_Multiply(&current_model_projection,&projection,&view);
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+    memcpy(current_model_clip_view.origin,current_camera.position,sizeof(current_model_clip_view.origin));
+    for(unsigned int i=0;i<4;++i) {
+        struct n3ds_model_clip_plane *plane=current_model_clip_view.planes+i;
+        const C3D_FVec *side=current_model_projection.r+i/2,*w=current_model_projection.r+3;
+        for(unsigned int j=0;j<4;++j) {
+            float s=side->c[3-j],d=w->c[3-j];
+            plane->coefficient[j]=(i&1?-s:s)-d;
+            plane->magnitude[j]=fabsf(s)+fabsf(d);
+        }
+    }
+#endif
     Mtx_Translate(&view,-camera->position[0],-camera->position[1],-camera->position[2],true);
     Mtx_Multiply(&combined, &projection, &view);
     current_projection=combined;
@@ -1598,7 +2002,11 @@ void n3ds_gpu_world_state_restore(void)
 int n3ds_gpu_geometry_draw(const struct native_render_vertex *vertices, const unsigned short *indices, unsigned int count)
 { return n3ds_gpu_indexed_draw(vertices,indices,count,sizeof(*vertices),3,0x210); }
 static int indexed_draw_resident(const void *,const unsigned short *,unsigned int,unsigned int,unsigned int,unsigned int);
-static int model_transform_draw(const void *vertices,const unsigned short *indices,unsigned int count,
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+static int indexed_draw_resident_byte(const void *,const unsigned char *,unsigned int,unsigned int,unsigned int,unsigned int);
+#endif
+enum { MODEL_INDEX_STAGED, MODEL_INDEX_RESIDENT, MODEL_INDEX_RESIDENT_BYTE };
+static int model_transform_draw(const void *vertices,const void *indices,unsigned int count,
     const float *rows,unsigned int nodes,const float uv[2],int sky,int decal,int two_sided,int skinned,
     const struct native_model_material *material,int resident_indices)
 {
@@ -1611,6 +2019,10 @@ static int model_transform_draw(const void *vertices,const unsigned short *indic
        (m->detail_mask && !m->multipurpose) || !isfinite(m->detail_scale[0]) || !isfinite(m->detail_scale[1]))) return 0;
     int pi=skinned+2;
     int key=!!sky | (!!decal<<1) | (!!two_sided<<2) | (!!skinned<<3) | (lit<<4) | (reflective<<5) | (detailed<<6);
+#ifdef HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT
+    int white_tint=lit && m->multipurpose && (m->tint&0xffffffu)==0xffffffu;
+    if(white_tint && gpu_probe_neutral_model_tint()) key|=MODEL_NEUTRAL_TINT;
+#endif
     int projection_location=lit?lit_programs[pi].projection:(skinned?skin_projection:rigid_projection);
     int bone_location=lit?lit_programs[pi].bone:(skinned?skin_bone:rigid_bone);
     int options_location=lit?lit_programs[pi].options:(skinned?skin_options:rigid_options);
@@ -1622,7 +2034,8 @@ static int model_transform_draw(const void *vertices,const unsigned short *indic
     int reuse=retained && !((model_state_key^key)&31);
     int same_program=retained && !((model_state_key^key)&24);
     float options[4]={uv[0],uv[1],sky?1.f:0.f,reflective?1.f:0.f};
-#if HALO_N3DS_ALGO_BOOLEAN_SELECTORS == N3DS_ALGORITHM_CANDIDATE
+#if HALO_N3DS_ALGO_BOOLEAN_SELECTORS == N3DS_ALGORITHM_CANDIDATE || \
+    HALO_N3DS_ALGO_MODEL_REFLECTION_DIRECT == N3DS_ALGORITHM_CANDIDATE
     options[3]=0.f;
 #endif
     if(!reuse) {
@@ -1644,11 +2057,24 @@ static int model_transform_draw(const void *vertices,const unsigned short *indic
       if(lit) C3D_FVUnifSet(GPU_VERTEX_SHADER,lit_programs[pi].camera,0,0,0,0);
       C3D_SetAttrInfo(&model_attributes[!!skinned]);
     } else ++model_state_reuses;
-    if(!retained || ((model_state_key^key)&114) || !!m->multipurpose!=!!model_cached_material.multipurpose ||
+    if(!retained || ((model_state_key^key)&(114|MODEL_NEUTRAL_TINT)) || !!m->multipurpose!=!!model_cached_material.multipurpose ||
        m->alpha_test!=model_cached_material.alpha_test || (detailed &&
-       (m->detail_function!=model_cached_material.detail_function || m->detail_mask!=model_cached_material.detail_mask || m->detail_after!=model_cached_material.detail_after)))
+       (m->detail_function!=model_cached_material.detail_function || m->detail_mask!=model_cached_material.detail_mask || m->detail_after!=model_cached_material.detail_after))) {
         model_material_apply(m,decal,lit);
-    else if(m->multipurpose) {
+#ifdef HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT
+        if(key&MODEL_NEUTRAL_TINT) {
+            /* Interpolating white with white yields white for every mask B.
+             * Pass stage 0 through both stages and keep only the later
+             * buffer write used by the detail or reflection equation. */
+            C3D_TexEnvInit(C3D_GetTexEnv(1));
+            C3D_TexEnvInit(C3D_GetTexEnv(2));
+            int buffer_mask=0;
+            if(reflective) buffer_mask=8;
+            else if(detailed) buffer_mask=m->detail_after?8:4;
+            C3D_TexEnvBufUpdate(C3D_RGB,buffer_mask);
+        }
+#endif
+    } else if(m->multipurpose) {
         if(m->emission!=model_cached_material.emission) C3D_TexEnvColor(C3D_GetTexEnv(0),m->emission);
         if(m->tint!=model_cached_material.tint) C3D_TexEnvColor(C3D_GetTexEnv(1),m->tint|0xff000000u);
     }
@@ -1706,7 +2132,8 @@ static int model_transform_draw(const void *vertices,const unsigned short *indic
      * transition. Only preserve that tail within the same rebasing domain. */
     model_cached_nodes=same_palette?(model_cached_nodes>nodes?model_cached_nodes:nodes):nodes;
 
-#if HALO_N3DS_ALGO_BOOLEAN_SELECTORS == N3DS_ALGORITHM_CANDIDATE
+#if HALO_N3DS_ALGO_BOOLEAN_SELECTORS == N3DS_ALGORITHM_CANDIDATE || \
+    HALO_N3DS_ALGO_MODEL_REFLECTION_DIRECT == N3DS_ALGORITHM_CANDIDATE
     if(lit && (!same_program || ((model_state_key^key)&32)))
         C3D_BoolUnifSet(GPU_VERTEX_SHADER,MODEL_REFLECTION_BOOL,reflective);
 #endif
@@ -1717,24 +2144,44 @@ static int model_transform_draw(const void *vertices,const unsigned short *indic
     model_state_key=key;model_state_valid=1;
     unsigned int stride=skinned?sizeof(struct native_skin_vertex):sizeof(struct native_render_vertex);
     unsigned int attributes=skinned?N3DS_SKIN_ATTRIBUTES:3,permutation=skinned?N3DS_SKIN_PERMUTATION:0x210;
-    int result=resident_indices?indexed_draw_resident(vertices,indices,count,stride,attributes,permutation):
+    int result=
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+        resident_indices==MODEL_INDEX_RESIDENT_BYTE?indexed_draw_resident_byte(vertices,indices,count,stride,attributes,permutation):
+#endif
+        resident_indices==MODEL_INDEX_RESIDENT?indexed_draw_resident(vertices,indices,count,stride,attributes,permutation):
         n3ds_gpu_indexed_draw(vertices,indices,count,stride,attributes,permutation);
+#ifdef HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT
+    if(result && gpu_probe.recording && white_tint) {
+        ++gpu_probe.draws[PROBE_MODEL_TINT_DRAWS];
+        gpu_probe.draws[PROBE_MODEL_TINT_BYPASSED]+=!!(key&MODEL_NEUTRAL_TINT);
+    }
+#endif
+#ifdef HALO_N3DS_A30_BENCHMARK
+    if(result) (lit?model_uv_elements:basic_model_uv_elements)[!!skinned]+=count;
+#endif
     if(!model_batch_active) n3ds_gpu_world_state_restore();
     return result;
 }
 int n3ds_gpu_model_rigid_draw(const struct native_render_vertex *v,const unsigned short *i,unsigned int count,
     const float rows[12],const float uv[2],int sky,int decal,int two_sided,const struct native_model_material *m)
-{return model_transform_draw(v,i,count,rows,1,uv,sky,decal,two_sided,0,m,0);}
+{return model_transform_draw(v,i,count,rows,1,uv,sky,decal,two_sided,0,m,MODEL_INDEX_STAGED);}
 int n3ds_gpu_model_skin_draw(const struct native_skin_vertex *v,const unsigned short *i,unsigned int count,
     const float *rows,unsigned int nodes,const float uv[2],int sky,int decal,int two_sided,const struct native_model_material *m)
-{return model_transform_draw(v,i,count,rows,nodes,uv,sky,decal,two_sided,1,m,0);}
+{return model_transform_draw(v,i,count,rows,nodes,uv,sky,decal,two_sided,1,m,MODEL_INDEX_STAGED);}
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+int n3ds_gpu_model_draw_resident_byte(const void *v,const unsigned char *i,unsigned int count,
+    const float *rows,unsigned int nodes,const float uv[2],int two_sided,int skinned,const struct native_model_material *m)
+{
+    return model_transform_draw(v,i,count,rows,nodes,uv,0,0,two_sided,skinned,m,MODEL_INDEX_RESIDENT_BYTE);
+}
+#endif
 int n3ds_gpu_model_scenery_draw_resident(const void *v,const unsigned short *i,unsigned int count,
     const float *rows,unsigned int instances,const float uv[2],int two_sided,const struct native_model_material *m)
 {
 #ifdef HALO_N3DS_DISABLE_RESIDENT_INDICES
-    const int resident=0;
+    const int resident=MODEL_INDEX_STAGED;
 #else
-    const int resident=1;
+    const int resident=MODEL_INDEX_RESIDENT;
 #endif
     return model_transform_draw(v,i,count,rows,instances,uv,0,0,two_sided,instances>1,m,resident);
 }
@@ -1743,9 +2190,9 @@ int n3ds_gpu_model_compact_draw_resident(const void *v,const unsigned short *i,u
 {
     if((skinned!=0 && skinned!=1) || (!skinned && nodes!=1))return 0;
 #ifdef HALO_N3DS_DISABLE_RESIDENT_INDICES
-    const int resident=0;
+    const int resident=MODEL_INDEX_STAGED;
 #else
-    const int resident=1;
+    const int resident=MODEL_INDEX_RESIDENT;
 #endif
     return model_transform_draw(v,i,count,rows,nodes,uv,0,0,two_sided,skinned,m,resident);
 }
@@ -2225,6 +2672,9 @@ static int model_special_transform(const void *v,const unsigned short *indices,u
     }
     int result=n3ds_gpu_indexed_draw(v,indices,count,skinned?sizeof(struct native_skin_vertex):sizeof(struct native_render_vertex),
         skinned?N3DS_SKIN_ATTRIBUTES:3,skinned?N3DS_SKIN_PERMUTATION:0x210);
+#ifdef HALO_N3DS_A30_BENCHMARK
+    if(result && !depth) basic_model_uv_elements[!!skinned]+=count;
+#endif
     n3ds_gpu_world_state_restore();return result;
 }
 int n3ds_gpu_model_depth_transform_draw(const void *v,const unsigned short *indices,unsigned int count,
@@ -2312,6 +2762,15 @@ int n3ds_gpu_environment_bump_draw(const struct native_render_vertex *vertices,
         C3D_TexEnvBufUpdate(C3D_RGB,1);C3D_TexEnvBufColor(0);
     }
     if(!bump_state_valid || material!=bump_material) {C3D_TexEnvColor(C3D_GetTexEnv(3),material);bump_material=material;}
+#ifdef HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA
+    if(gpu_probe.recording && alpha_test && n3ds_gpu_base_texture_opaque()) {
+        ++gpu_probe.draws[PROBE_TERRAIN_ALPHA_ELIGIBLE];
+        if(probe_modes[gpu_probe.phase]==PROBE_OPAQUE_TERRAIN_ALPHA_MODE) {
+            alpha_test=0;
+            ++gpu_probe.draws[PROBE_TERRAIN_ALPHA_BYPASSED];
+        }
+    }
+#endif
     if(!bump_state_valid || !!alpha_test!=bump_alpha) {C3D_AlphaTest(!!alpha_test,GPU_GREATER,127);bump_alpha=!!alpha_test;}
     if(!bump_state_valid || bump_scale[0]!=u_scale || bump_scale[1]!=v_scale) {
         C3D_FVUnifSet(GPU_VERTEX_SHADER,environment_options,u_scale,v_scale,0,0);bump_scale[0]=u_scale;bump_scale[1]=v_scale;
@@ -2907,10 +3366,10 @@ const unsigned short *n3ds_gpu_indices_upload(const unsigned short *indices,unsi
     index_used = (index_used+count*2+3)&~3u;
     return gpu_indices;
 }
-const unsigned short *n3ds_gpu_indices_upload_resident(const unsigned short *indices,unsigned int count)
+static void *index_upload_resident(const unsigned short *indices,unsigned int count,unsigned int width)
 {
     if (!frame_active || !n3ds_gpu_index_residency_epoch() || !indices || !count || count%3 ||
-        count > (RESIDENT_INDEX_BYTES-resident_index_used)/sizeof(*indices))
+        count > (RESIDENT_INDEX_BYTES-resident_index_used)/width)
         return NULL;
     if (!resident_index_stream) {
         if (linearSpaceFree() >= RESIDENT_INDEX_HEADROOM + RESIDENT_INDEX_BYTES)
@@ -2920,32 +3379,56 @@ const unsigned short *n3ds_gpu_indices_upload_resident(const unsigned short *ind
             return NULL;
         }
     }
-    unsigned int bytes = count * sizeof(*indices);
-    unsigned short *destination = (unsigned short *)(resident_index_stream + resident_index_used);
-    memcpy(destination, indices, bytes);
+    unsigned int bytes = count * width;
+    unsigned char *destination = resident_index_stream + resident_index_used;
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+    if(width==sizeof(*destination)) {
+        for(unsigned int i=0;i<count;++i) {
+            if(indices[i]>255) return NULL;
+            destination[i]=(unsigned char)indices[i];
+        }
+    } else
+#endif
+        memcpy(destination,indices,bytes);
     if (R_FAILED(GSPGPU_FlushDataCache(destination, bytes)))
         return NULL;
     resident_index_used = (resident_index_used + bytes + 3) & ~3u;
     if (resident_index_used > resident_index_peak)
         resident_index_peak = resident_index_used;
     ++resident_index_uploads;
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+    if(width==sizeof(*destination)) {
+        ++byte_index_uploads;
+        byte_index_uploaded_bytes+=bytes;
+    }
+#endif
     return destination;
 }
+const unsigned short *n3ds_gpu_indices_upload_resident(const unsigned short *indices,unsigned int count)
+{
+    return index_upload_resident(indices,count,sizeof(*indices));
+}
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+const unsigned char *n3ds_gpu_indices_upload_resident_byte(const unsigned short *indices,unsigned int count)
+{
+    return index_upload_resident(indices,count,sizeof(unsigned char));
+}
+#endif
 
-static int index_arena_contains(const void *arena,unsigned int used,const void *indices,unsigned int count)
+static int index_arena_contains(const void *arena,unsigned int used,const void *indices,unsigned int bytes)
 {
     uintptr_t address = (uintptr_t)indices, base = (uintptr_t)arena;
     return arena && !(address & 3) && address >= base && address-base <= used &&
-        count <= (used-(address-base))/sizeof(unsigned short);
+        bytes <= used-(address-base);
 }
 
 const unsigned short *n3ds_gpu_indices_prepare(const unsigned short *indices,unsigned int count)
 {
-    if(!frame_active || !indices || !count || count%3) return NULL;
+    if(!frame_active || !indices || !count || count%3 || count>INDEX_BYTES/sizeof(*indices)) return NULL;
     /* Only our already-written arenas bypass staging. Caller buffers can
      * include reused stack memory or transient CPU triangle lists. */
-    if(index_arena_contains(index_stream,index_used,indices,count) ||
-       index_arena_contains(resident_index_stream,resident_index_used,indices,count)) return indices;
+    if(index_arena_contains(index_stream,index_used,indices,count*sizeof(*indices)) ||
+       index_arena_contains(resident_index_stream,resident_index_used,indices,count*sizeof(*indices))) return indices;
     return n3ds_gpu_indices_upload(indices,count);
 }
 int n3ds_gpu_indexed_draw(const void *vertices,const unsigned short *indices,unsigned int count,
@@ -2962,7 +3445,8 @@ static int indexed_draw_resident(const void *vertices,const unsigned short *gpu_
     if(!frame_active || !vertices || !gpu_indices || !count || count%3 || ((uintptr_t)gpu_indices&3)) return 0;
     if(!n3ds_gpu_vertex_buffer_bind(vertices,stride,attributes,permutation)) return 0;
 #ifdef HALO_N3DS_PERFORMANCE_PROFILE
-    if(index_arena_contains(resident_index_stream,resident_index_used,gpu_indices,count)) ++resident_index_draws;
+    if(count<=RESIDENT_INDEX_BYTES/sizeof(*gpu_indices) &&
+       index_arena_contains(resident_index_stream,resident_index_used,gpu_indices,count*sizeof(*gpu_indices))) ++resident_index_draws;
 #endif
     for (unsigned int i=0; i<count; i+=30000) {
         unsigned int chunk = count-i;
@@ -2972,6 +3456,30 @@ static int indexed_draw_resident(const void *vertices,const unsigned short *gpu_
     }
     return 1;
 }
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+static int indexed_draw_resident_byte(const void *vertices,const unsigned char *indices,unsigned int count,
+    unsigned int stride,unsigned int attributes,unsigned int permutation)
+{
+    /* Admission caps these lists below the single draw limit. */
+    if(!frame_active || !vertices || !count || count%3 || count>30000 ||
+       !index_arena_contains(resident_index_stream,resident_index_used,indices,count)) return 0;
+    if(!n3ds_gpu_vertex_buffer_bind(vertices,stride,attributes,permutation)) return 0;
+    C3D_DrawElements(GPU_TRIANGLES,count,C3D_UNSIGNED_BYTE,indices);
+    ALGORITHM_GPU_DRAW(count);
+#ifdef HALO_N3DS_PERFORMANCE_PROFILE
+    ++resident_index_draws;
+#endif
+    ++byte_index_draws;byte_index_elements+=count;
+    return 1;
+}
+#endif
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+int n3ds_gpu_indexed_draw_resident(const void *vertices,const unsigned short *indices,
+    unsigned int count,unsigned int stride,unsigned int attributes,unsigned int permutation)
+{
+    return indexed_draw_resident(vertices,indices,count,stride,attributes,permutation);
+}
+#endif
 #ifdef HALO_N3DS_PRESENT_INTERPOLATION
 static int discard_midpoint_if_rejected(void)
 {
@@ -3016,17 +3524,32 @@ void n3ds_gpu_present(void)
     if (discard_midpoint_if_rejected()) return;
     const int midpoint = midpoint_state == MIDPOINT_RENDERING;
     const int top_used = target->used || (right_target && right_target->used);
-    if (midpoint)
+    const int tracking = __atomic_load_n(&swap_tracking_enabled, __ATOMIC_RELAXED);
+    if (midpoint) {
+        int ready = top_used && tracking && gspHasGpuRight() && top_swap_visible();
+        if (!ready && top_used && tracking && midpoint_swap_deadline && gspHasGpuRight()) {
+            n3ds_trace_event(N3DS_TRACE_GPU_SWAP_WAIT_BEGIN,top_swap_wait_for,0);
+            long long wait_begin = svcGetSystemTick();
+            ready = wait_for_top_swap(midpoint_swap_deadline);
+            frame_wait_ticks += svcGetSystemTick() - wait_begin;
+            n3ds_trace_event(N3DS_TRACE_GPU_SWAP_WAIT_END,top_swap_wait_for,ready);
+        }
+        /* A queued render target is only command data until FrameEnd. Leave
+         * the scanning buffer and the previous posted swap alone on failure. */
+        if (!ready || !gspHasGpuRight())
+            n3ds_presentation_reject_reason = NATIVE_MIDPOINT_SWAP;
+        if (discard_midpoint_if_rejected()) return;
         bottom_target->used = false;
-    if (top_used && __atomic_load_n(&swap_tracking_enabled, __ATOMIC_RELAXED)) {
+    }
+    if (top_used && tracking) {
         /* The previous transfer may be done before its swap has latched. A
          * keyframe can render into VRAM while that swap is pending, but must
          * keep its transfer away from the still-scanning LCD buffer. */
-        int ready = top_swap_visible();
-        if (!ready && !midpoint) {
+        int ready = midpoint || top_swap_visible();
+        if (!ready) {
             n3ds_trace_event(N3DS_TRACE_GPU_SWAP_WAIT_BEGIN,top_swap_wait_for,0);
             long long wait_begin = svcGetSystemTick();
-            ready = wait_for_top_swap();
+            ready = wait_for_top_swap(wait_begin + TOP_REFRESH_TICKS);
             frame_wait_ticks += svcGetSystemTick() - wait_begin;
             n3ds_trace_event(N3DS_TRACE_GPU_SWAP_WAIT_END,top_swap_wait_for,ready);
             n3ds_trace_gpu_poll();
@@ -3971,10 +4494,16 @@ static int water_draw(const struct native_render_vertex *vertices,const unsigned
          * folded into ordinary source-alpha blending without a scene read. */
         surface_water_pass(1,0);
         if(!indexed_draw_resident(vertices,indices,count,stride,attributes,permutation)) {n3ds_gpu_world_state_restore();return 0;}
+#ifdef HALO_N3DS_A30_BENCHMARK
+        water_shader_elements+=count;
+#endif
         n3ds_algorithm_profile_add(N3DS_ALGORITHM_GPU_WATER_BASE_PASSES,1);
     }
     surface_water_pass(0,m->flags&1);
     int result=indexed_draw_resident(vertices,indices,count,stride,attributes,permutation);
+#ifdef HALO_N3DS_A30_BENCHMARK
+    if(result) water_shader_elements+=count;
+#endif
     if(result) n3ds_algorithm_profile_add(N3DS_ALGORITHM_GPU_WATER_REFLECTION_PASSES,1);
     if(!surface_batch_active || !result) {
         n3ds_gpu_texture_bind(1,m->base);n3ds_gpu_world_state_restore();
@@ -4035,6 +4564,9 @@ int n3ds_gpu_glass_native_sky_draw(const struct native_render_vertex *vertices,
         surface_vector(glass_program.options,options,surface_uniforms.options,retained);
         surface_glass_pass(0,m->tint);
         ok=indexed_draw_resident(vertices,indices,count,sizeof(*vertices),3,0x210);
+#ifdef HALO_N3DS_A30_BENCHMARK
+        if(ok) glass_shader_elements+=count;
+#endif
     }
     if(ok && m->diffuse) {
 #if HALO_N3DS_ALGO_BOOLEAN_SELECTORS == N3DS_ALGORITHM_REFERENCE
@@ -4043,6 +4575,9 @@ int n3ds_gpu_glass_native_sky_draw(const struct native_render_vertex *vertices,
         surface_vector(glass_program.options,options,surface_uniforms.options,retained || surface_pass!=0);
         surface_glass_pass(1,m->tint);
         ok=indexed_draw_resident(vertices,indices,count,sizeof(*vertices),3,0x210);
+#ifdef HALO_N3DS_A30_BENCHMARK
+        if(ok) glass_shader_elements+=count;
+#endif
     }
     if(!surface_batch_active || !ok)n3ds_gpu_world_state_restore();
     return ok;

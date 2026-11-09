@@ -10,56 +10,137 @@
 #include "engine_parallel.h"
 #include "engine_sounds.h"
 #include "engine_algorithm_profile.h"
+void n3ds_log(const char *);
 
-enum { SOUND_READ_IDLE,SOUND_READ_QUEUED,SOUND_READ_DONE,SOUND_READ_CHUNK=32*1024 };
+/* One pending request takes priority over two authored continuation hints.
+ * Each mailbox retains its latest request even while the worker finishes an
+ * older chunk. Only the worker grows/writes buffers and only the owner copies
+ * completed bytes. Revisions invalidate in-flight and completed work alike. */
+enum { SOUND_READ_PENDING,SOUND_READ_FIRST_LINK,SOUND_READ_SLOTS=3,SOUND_READ_CHUNK=32*1024 };
+enum sound_read_kind { SOUND_READ_REQUEST,SOUND_READ_LINK,SOUND_READ_NEIGHBOR };
+struct sound_read_slot {
+    struct n3ds_sound_read_key key;
+    char path[128];
+    unsigned char *buffer;
+    unsigned int revision,work_revision,capacity,done;
+    enum sound_read_kind kind;
+    int failed;
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+    u64 offered_tick,offered_loop;
+#endif
+};
+static struct sound_read_slot sound_reads[SOUND_READ_SLOTS];
 static Thread sound_reader;
 static LightEvent sound_reader_work;
-static int sound_reader_state,sound_reader_stop,sound_reader_cancelled,sound_reader_success;
-static int sound_reader_unavailable;
-static unsigned char *sound_reader_buffer;
-static unsigned int sound_reader_capacity;
-static char sound_reader_path[128];
-static struct n3ds_sound_read_key sound_reader_key;
+static LightLock sound_reader_lock;
+static int sound_reader_stop,sound_reader_paused,sound_reader_unavailable;
+static unsigned int pending_slot=SOUND_READ_PENDING;
+static unsigned int next_link=SOUND_READ_FIRST_LINK;
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+static unsigned int stage_late_logs;
+#endif
 
-static int same_read(const struct n3ds_sound_read_key *key)
+static int same_range(const struct n3ds_sound_read_key *a,const struct n3ds_sound_read_key *b)
 {
-    return key->map_generation==sound_reader_key.map_generation && key->handle==sound_reader_key.handle &&
-        key->offset==sound_reader_key.offset && key->bytes==sound_reader_key.bytes;
+    return a->map_generation==b->map_generation && a->offset==b->offset && a->bytes==b->bytes;
+}
+static void clear_read(struct sound_read_slot *slot)
+{
+    slot->key.bytes=0;
+    ++slot->revision;
+    if (slot==sound_reads+pending_slot) pending_slot=SOUND_READ_PENDING;
+}
+static int needs_read(const struct sound_read_slot *slot)
+{
+    return slot->key.bytes && (slot->work_revision!=slot->revision ||
+        (!slot->failed && slot->done<slot->key.bytes));
+}
+static struct sound_read_slot *next_read(void)
+{
+    if (sound_reader_paused) return NULL;
+    if (needs_read(sound_reads+pending_slot)) return sound_reads+pending_slot;
+    struct sound_read_slot *neighbor=NULL;
+    for (int i=0;i<SOUND_READ_SLOTS;++i) {
+        struct sound_read_slot *slot=sound_reads+i;
+        if (!needs_read(slot)) continue;
+        if (slot->kind!=SOUND_READ_NEIGHBOR) return slot;
+        neighbor=slot;
+    }
+    return neighbor;
+}
+static int read_current(struct sound_read_slot *slot,unsigned int revision)
+{
+    LightLock_Lock(&sound_reader_lock);
+    int current=!sound_reader_stop && !sound_reader_paused && slot->revision==revision;
+    LightLock_Unlock(&sound_reader_lock);
+    return current;
 }
 static void sound_reader_main(void *unused)
 {
     (void)unused;
-    char open_path[sizeof(sound_reader_path)]={0};
+    char open_path[sizeof(sound_reads[0].path)]={0};
     Handle file=0;
     for (;;) {
-        LightEvent_Wait(&sound_reader_work);
-        if (__atomic_load_n(&sound_reader_stop,__ATOMIC_ACQUIRE)) break;
-        if (__atomic_load_n(&sound_reader_state,__ATOMIC_ACQUIRE)!=SOUND_READ_QUEUED) continue;
-        unsigned int done=0;
-        if (!__atomic_load_n(&sound_reader_cancelled,__ATOMIC_ACQUIRE) &&
-            (!file || strcmp(open_path,sound_reader_path))) {
+        LightLock_Lock(&sound_reader_lock);
+        if (sound_reader_stop) {
+            LightLock_Unlock(&sound_reader_lock);
+            break;
+        }
+        struct sound_read_slot *slot=next_read();
+        if (!slot) {
+            LightLock_Unlock(&sound_reader_lock);
+            LightEvent_Wait(&sound_reader_work);
+            continue;
+        }
+        unsigned int revision=slot->revision;
+        if (slot->work_revision!=revision) {
+            slot->work_revision=revision;
+            slot->done=0;
+            slot->failed=0;
+        }
+        unsigned int done=slot->done;
+        struct n3ds_sound_read_key key=slot->key;
+        char path[sizeof(slot->path)];
+        strcpy(path,slot->path);
+        LightLock_Unlock(&sound_reader_lock);
+
+        int failed=0;
+        if (key.bytes>slot->capacity) {
+            unsigned int capacity=(key.bytes+SOUND_READ_CHUNK-1)&~(SOUND_READ_CHUNK-1u);
+            unsigned char *buffer=realloc(slot->buffer,capacity);
+            if (buffer) {
+                slot->buffer=buffer;
+                slot->capacity=capacity;
+            } else failed=1;
+        }
+        if (!failed && (!file || strcmp(open_path,path))) {
+            if (!read_current(slot,revision)) continue;
             if (file) FSFILE_Close(file);
             file=0;
             if (R_SUCCEEDED(FSUSER_OpenFileDirectly(&file,ARCHIVE_SDMC,fsMakePath(PATH_EMPTY,NULL),
-                    fsMakePath(PATH_ASCII,sound_reader_path+5),FS_OPEN_READ,0)))
-                strcpy(open_path,sound_reader_path);
-            else file=0;
+                    fsMakePath(PATH_ASCII,path+5),FS_OPEN_READ,0))) strcpy(open_path,path);
+            else { file=0; failed=1; }
         }
-        while (file && done<sound_reader_key.bytes &&
-                !__atomic_load_n(&sound_reader_cancelled,__ATOMIC_ACQUIRE)) {
-            unsigned int count=sound_reader_key.bytes-done;
+        u32 got=0;
+        if (!failed) {
+            /* Owner fallback can overlap a chunk already starting. Every
+             * subsequent chunk checks the pause and mailbox revision. */
+            if (!read_current(slot,revision)) continue;
+            unsigned int count=key.bytes-done;
             if (count>SOUND_READ_CHUNK) count=SOUND_READ_CHUNK;
-            u32 got=0;
-            if (R_FAILED(FSFILE_Read(file,&got,(u64)sound_reader_key.offset+done,
-                    sound_reader_buffer+done,count)) || !got || got>count) {
+            if (R_FAILED(FSFILE_Read(file,&got,(u64)key.offset+done,slot->buffer+done,count)) ||
+                    !got || got>count) {
                 FSFILE_Close(file);
                 file=0;
-                break;
+                failed=1;
             }
-            done+=got;
         }
-        sound_reader_success=done==sound_reader_key.bytes;
-        __atomic_store_n(&sound_reader_state,SOUND_READ_DONE,__ATOMIC_RELEASE);
+        LightLock_Lock(&sound_reader_lock);
+        if (slot->revision==revision) {
+            if (failed) slot->failed=1;
+            else slot->done+=got;
+        }
+        LightLock_Unlock(&sound_reader_lock);
     }
     if (file) FSFILE_Close(file);
 }
@@ -76,88 +157,220 @@ int n3ds_sound_reader_supported(void)
     return supported;
 #endif
 }
-void n3ds_sound_reader_cancel(void)
+static int sound_reader_start(void)
 {
-    __atomic_store_n(&sound_reader_cancelled,1,__ATOMIC_RELEASE);
+    if (sound_reader) return 1;
+    if (sound_reader_unavailable) return 0;
+    LightLock_Init(&sound_reader_lock);
+    LightEvent_Init(&sound_reader_work,RESET_ONESHOT);
+    s32 priority=0x30;
+    svcGetThreadPriority(&priority,CUR_THREAD_HANDLE);
+    priority=priority<=0x3c?priority+3:0x3f;
+    /* Keep the existing geometry/codec and texture workers above this reader. */
+    sound_reader=threadCreate(sound_reader_main,NULL,16*1024,priority,2,false);
+    if (!sound_reader) sound_reader_unavailable=1;
+    return sound_reader!=NULL;
 }
-void n3ds_sound_reader_discard(unsigned int map_generation,unsigned int handle)
+static void offer_read(const char *path,const struct n3ds_sound_read_key *key,enum sound_read_kind kind)
 {
-    if (__atomic_load_n(&sound_reader_state,__ATOMIC_ACQUIRE)!=SOUND_READ_IDLE &&
-        sound_reader_key.map_generation==map_generation && sound_reader_key.handle==handle)
-        n3ds_sound_reader_cancel();
-}
-void n3ds_sound_reader_offer(const char *path,const struct n3ds_sound_read_key *key)
-{
-    if (sound_reader_unavailable || !path || strncmp(path,"sdmc:/",6) ||
-        strlen(path)>=sizeof(sound_reader_path) || !key->bytes || key->bytes>N3DS_SOUND_READ_LIMIT ||
-        key->offset>~0u-key->bytes) return;
-    int state=__atomic_load_n(&sound_reader_state,__ATOMIC_ACQUIRE);
-    if (state!=SOUND_READ_IDLE && same_read(key) &&
-        !__atomic_load_n(&sound_reader_cancelled,__ATOMIC_ACQUIRE)) return;
-    if (state==SOUND_READ_QUEUED) {
-        /* A lower pending slot may replace the hint. Never wait for a reader
-         * on the game thread or rewrite its data before it reports completion. */
-        n3ds_sound_reader_cancel();
-        return;
-    }
-    if (key->bytes>sound_reader_capacity) {
-        unsigned int capacity=(key->bytes+SOUND_READ_CHUNK-1)&~(SOUND_READ_CHUNK-1u);
-        unsigned char *buffer=realloc(sound_reader_buffer,capacity);
-        if (!buffer) return;
-        sound_reader_buffer=buffer;
-        sound_reader_capacity=capacity;
-    }
-    if (!sound_reader) {
-        LightEvent_Init(&sound_reader_work,RESET_ONESHOT);
-        __atomic_store_n(&sound_reader_stop,0,__ATOMIC_RELAXED);
-        s32 priority=0x30;
-        svcGetThreadPriority(&priority,CUR_THREAD_HANDLE);
-        priority=priority<=0x3c?priority+3:0x3f;
-        /* Leave the main and system cores alone, and keep the existing
-         * geometry/codec and texture helper jobs above this reader. */
-        sound_reader=threadCreate(sound_reader_main,NULL,16*1024,priority,2,false);
-        if (!sound_reader) {
-            sound_reader_unavailable=1;
-            free(sound_reader_buffer);
-            sound_reader_buffer=NULL;
-            sound_reader_capacity=0;
+    int request=kind==SOUND_READ_REQUEST;
+    unsigned int limit=request?N3DS_SOUND_READ_LIMIT:N3DS_SOUND_LINK_READ_LIMIT;
+    if (!path || strncmp(path,"sdmc:/",6) || strlen(path)>=sizeof(sound_reads[0].path) ||
+        !key->bytes || key->bytes>limit || key->offset>~0u-key->bytes || !sound_reader_start()) return;
+    LightLock_Lock(&sound_reader_lock);
+    for (unsigned int i=0;i<SOUND_READ_SLOTS;++i) {
+        struct n3ds_sound_read_key *existing=&sound_reads[i].key;
+        if (same_range(existing,key) && (!request || !existing->handle || existing->handle==key->handle)) {
+            /* Preserve progress and protect the promoted buffer from new
+             * predictions until the owner consumes or supersedes it. */
+            int promote=request && pending_slot!=i;
+            if (request) {
+                pending_slot=i;
+                existing->handle=key->handle;
+            } else if (kind==SOUND_READ_LINK && sound_reads[i].kind==SOUND_READ_NEIGHBOR) {
+                sound_reads[i].kind=SOUND_READ_LINK;
+                promote=1;
+            }
+            LightLock_Unlock(&sound_reader_lock);
+            if (promote) LightEvent_Signal(&sound_reader_work);
             return;
         }
     }
-    strcpy(sound_reader_path,path);
-    sound_reader_key=*key;
-    __atomic_store_n(&sound_reader_cancelled,0,__ATOMIC_RELAXED);
-    __atomic_store_n(&sound_reader_state,SOUND_READ_QUEUED,__ATOMIC_RELEASE);
+    unsigned int index=SOUND_READ_PENDING;
+    if (!request) {
+        unsigned int empty=SOUND_READ_SLOTS,neighbor=SOUND_READ_SLOTS;
+        for (unsigned int i=SOUND_READ_FIRST_LINK;i<SOUND_READ_SLOTS;++i) {
+            if (i==pending_slot) continue;
+            if (!sound_reads[i].key.bytes) {
+                if (empty==SOUND_READ_SLOTS) empty=i;
+            }
+            else if (sound_reads[i].kind==SOUND_READ_NEIGHBOR) neighbor=i;
+        }
+        /* A packed neighbor uses spare capacity. Exact continuations can
+         * replace it and always get their I/O turn before it. */
+        if (kind==SOUND_READ_NEIGHBOR) {
+            if (empty==SOUND_READ_SLOTS || neighbor!=SOUND_READ_SLOTS ||
+                (sound_reads[pending_slot].key.bytes && sound_reads[pending_slot].kind==SOUND_READ_NEIGHBOR)) {
+                LightLock_Unlock(&sound_reader_lock);
+                return;
+            }
+            index=empty;
+        } else if (empty!=SOUND_READ_SLOTS) index=empty;
+        else if (neighbor!=SOUND_READ_SLOTS) index=neighbor;
+        else {
+            index=next_link;
+            if (index==pending_slot)
+                index=index==SOUND_READ_FIRST_LINK?index+1:SOUND_READ_FIRST_LINK;
+        }
+        if (kind==SOUND_READ_LINK) next_link=index+1==SOUND_READ_SLOTS?SOUND_READ_FIRST_LINK:index+1;
+    } else pending_slot=index;
+    struct sound_read_slot *slot=sound_reads+index;
+    slot->key=*key;
+    slot->kind=kind;
+    strcpy(slot->path,path);
+    ++slot->revision;
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+    slot->offered_tick=svcGetSystemTick();
+    slot->offered_loop=n3ds_algorithm_profile_loop_id();
+#endif
+    LightLock_Unlock(&sound_reader_lock);
     LightEvent_Signal(&sound_reader_work);
+    if (kind==SOUND_READ_LINK) n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_STAGE_LINK_HINTS,1);
+    if (kind==SOUND_READ_NEIGHBOR) n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_STAGE_NEIGHBOR_HINTS,1);
 }
+void n3ds_sound_reader_offer(const char *path,const struct n3ds_sound_read_key *key)
+{
+    offer_read(path,key,SOUND_READ_REQUEST);
+}
+void n3ds_sound_reader_predict(const char *path,const struct n3ds_sound_read_key *key)
+{
+    offer_read(path,key,SOUND_READ_LINK);
+}
+void n3ds_sound_reader_predict_neighbor(const char *path,const struct n3ds_sound_read_key *key)
+{
+    offer_read(path,key,SOUND_READ_NEIGHBOR);
+}
+void n3ds_sound_reader_cancel(void)
+{
+    if (!sound_reader) return;
+    LightLock_Lock(&sound_reader_lock);
+    for (int i=0;i<SOUND_READ_SLOTS;++i) clear_read(sound_reads+i);
+    LightLock_Unlock(&sound_reader_lock);
+}
+void n3ds_sound_reader_discard(unsigned int map_generation,unsigned int handle)
+{
+    if (!sound_reader) return;
+    LightLock_Lock(&sound_reader_lock);
+    for (int i=0;i<SOUND_READ_SLOTS;++i) {
+        struct sound_read_slot *slot=sound_reads+i;
+        if (slot->key.bytes && slot->key.map_generation==map_generation && slot->key.handle==handle)
+            clear_read(slot);
+    }
+    LightLock_Unlock(&sound_reader_lock);
+}
+#ifdef HALO_N3DS_ASYNC_SOUND_IDLE
+enum n3ds_sound_read_status n3ds_sound_reader_status(const struct n3ds_sound_read_key *key)
+{
+    if (!sound_reader) return N3DS_SOUND_READ_UNAVAILABLE;
+    enum n3ds_sound_read_status status=N3DS_SOUND_READ_UNAVAILABLE;
+    LightLock_Lock(&sound_reader_lock);
+    const struct sound_read_slot *slot=sound_reads+pending_slot;
+    if (slot->key.handle==key->handle && same_range(&slot->key,key)) {
+        if (slot->work_revision!=slot->revision) status=N3DS_SOUND_READ_WAITING;
+        else if (slot->failed) status=N3DS_SOUND_READ_FAILED;
+        else if (slot->done==key->bytes) status=N3DS_SOUND_READ_READY;
+        else status=N3DS_SOUND_READ_WAITING;
+    }
+    LightLock_Unlock(&sound_reader_lock);
+    return status;
+}
+#endif
 int n3ds_sound_reader_copy(const struct n3ds_sound_read_key *key,void *destination)
 {
-    int state=__atomic_load_n(&sound_reader_state,__ATOMIC_ACQUIRE);
-    if (state==SOUND_READ_QUEUED) {
-        /* A synchronous cache read is now authoritative. Avoid issuing
-         * another speculative SD request between its own I/O operations. */
-        n3ds_sound_reader_cancel();
+    const unsigned char *buffer=NULL;
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+    enum sound_read_kind kind=SOUND_READ_REQUEST;
+    int matched=0,late=0,selected=0;
+    unsigned int done=0;
+    u64 offered_tick=0,offered_loop=0;
+#endif
+    if (sound_reader) {
+        LightLock_Lock(&sound_reader_lock);
+        for (int i=0;i<SOUND_READ_SLOTS;++i) {
+            struct sound_read_slot *slot=sound_reads+i;
+            if (!same_range(&slot->key,key) || (slot->key.handle && slot->key.handle!=key->handle)) continue;
+            int current=slot->work_revision==slot->revision;
+            if (current && slot->done==key->bytes) {
+                buffer=slot->buffer;
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+                kind=slot->kind;
+#endif
+            }
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+            matched=1;
+            if (!current || !slot->failed) {
+                late=1;
+                selected=current;
+                done=current?slot->done:0;
+                offered_tick=slot->offered_tick;
+                offered_loop=slot->offered_loop;
+            }
+#endif
+            clear_read(slot);
+        }
+        /* A miss falls back immediately. Retain unrelated work, including
+         * partial chunks, but pause further speculative reads until it ends. */
+        if (!buffer) sound_reader_paused=1;
+        LightLock_Unlock(&sound_reader_lock);
+    }
+    if (!buffer) {
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+        n3ds_algorithm_profile_add(late?N3DS_ALG_IO_SOUND_STAGE_LATE:
+            matched?N3DS_ALG_IO_SOUND_STAGE_FAILED:N3DS_ALG_IO_SOUND_STAGE_ABSENT,1);
+        if (late && stage_late_logs<64) {
+            struct n3ds_algorithm_profile_context context;
+            n3ds_algorithm_profile_snapshot(&context);
+            u64 age_us=(svcGetSystemTick()-offered_tick)*1000000/SYSCLOCK_ARM11;
+            char message[230];
+            snprintf(message,sizeof(message),"SOUND STAGE LATE: loop=%llu tick=%ld offer_loop=%llu age_us=%llu selected=%d staged=%u offset=%u bytes=%u",
+                context.loop,context.tick,offered_loop,age_us,selected,done,key->offset,key->bytes);
+            n3ds_log(message);
+            ++stage_late_logs;
+        }
+#endif
         return 0;
     }
-    if (state!=SOUND_READ_DONE || !same_read(key)) return 0;
-    int success=sound_reader_success && !__atomic_load_n(&sound_reader_cancelled,__ATOMIC_ACQUIRE);
-    if (success) memcpy(destination,sound_reader_buffer,key->bytes);
-    __atomic_store_n(&sound_reader_state,SOUND_READ_IDLE,__ATOMIC_RELAXED);
-    return success;
+    /* Only this thread can offer another request to reuse the cleared slot. */
+    memcpy(destination,buffer,key->bytes);
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+    if (kind==SOUND_READ_LINK) n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_STAGE_LINK_HITS,1);
+    if (kind==SOUND_READ_NEIGHBOR) n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_STAGE_NEIGHBOR_HITS,1);
+#endif
+    return 1;
+}
+void n3ds_sound_reader_resume(void)
+{
+    if (!sound_reader) return;
+    LightLock_Lock(&sound_reader_lock);
+    sound_reader_paused=0;
+    LightLock_Unlock(&sound_reader_lock);
+    LightEvent_Signal(&sound_reader_work);
 }
 void n3ds_sound_reader_shutdown(void)
 {
     if (!sound_reader) return;
-    n3ds_sound_reader_cancel();
-    __atomic_store_n(&sound_reader_stop,1,__ATOMIC_RELEASE);
+    LightLock_Lock(&sound_reader_lock);
+    sound_reader_stop=1;
+    LightLock_Unlock(&sound_reader_lock);
     LightEvent_Signal(&sound_reader_work);
     if (svcWaitSynchronization(threadGetHandle(sound_reader),U64_MAX)!=0) svcBreak(USERBREAK_PANIC);
     threadFree(sound_reader);
     sound_reader=NULL;
-    free(sound_reader_buffer);
-    sound_reader_buffer=NULL;
-    sound_reader_capacity=0;
-    __atomic_store_n(&sound_reader_state,SOUND_READ_IDLE,__ATOMIC_RELAXED);
+    for (int i=0;i<SOUND_READ_SLOTS;++i) free(sound_reads[i].buffer);
+    memset(sound_reads,0,sizeof(sound_reads));
+    sound_reader_stop=sound_reader_paused=0;
+    pending_slot=SOUND_READ_PENDING;
+    next_link=SOUND_READ_FIRST_LINK;
 }
 
 #define VOICES 24
@@ -176,7 +389,10 @@ static short *storage;
 static int ready,count,paused;
 static unsigned int decoded_frames,underruns,submitted;
 static int exit_registered;
-void n3ds_log(const char *);
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+static u64 prior_audio_update;
+static unsigned int drain_logs;
+#endif
 static void audio_exit(void)
 {
     if(!ready) return;
@@ -196,6 +412,9 @@ int n3ds_audio_initialize(int channels)
         exit_registered=1;
     }
     decoded_frames=underruns=submitted=0;
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+    prior_audio_update=0;
+#endif
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);ndspSetMasterVol(.8f);
     for(int i=0;i<count;++i) {
         ndspChnReset(i);ndspChnSetInterp(i,NDSP_INTERP_LINEAR);
@@ -272,6 +491,9 @@ void n3ds_audio_properties(int i,float rate,float left,float right)
 }
 void n3ds_audio_pause(int p)
 {
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+    if (p) prior_audio_update=0;
+#endif
     paused=p;for(int i=0;ready && i<count;++i) ndspChnSetPaused(i,p!=0);
 }
 struct audio_decode_job {
@@ -296,13 +518,25 @@ void n3ds_audio_update(void)
     if(!ready || paused) return;
 #ifdef HALO_N3DS_ALGORITHM_PROFILE
     u64 profile_start=svcGetSystemTick();
+    u64 gap=prior_audio_update?profile_start-prior_audio_update:0;
+    prior_audio_update=profile_start;
     unsigned int profile_active=0,profile_pcm=0,profile_drains=0,profile_bad=0;
     unsigned int profile_frames=0,profile_packets=0;
 #endif
     unsigned int jobs=0,compressed_bytes=0;
     for(int i=0;i<count;++i) {
         struct voice *v=voices+i;
-        for(int p=0;p<PACKETS;++p) if(v->wave[p].status==NDSP_WBUF_DONE) {v->wave[p].status=NDSP_WBUF_FREE;--v->outstanding;}
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+        unsigned int retired_frames=0,retired_packets=0;
+#endif
+        for(int p=0;p<PACKETS;++p) if(v->wave[p].status==NDSP_WBUF_DONE) {
+#ifdef HALO_N3DS_ALGORITHM_PROFILE
+            retired_frames+=v->wave[p].nsamples;
+            ++retired_packets;
+#endif
+            v->wave[p].status=NDSP_WBUF_FREE;
+            --v->outstanding;
+        }
         if(v->current.data && v->current.offset==v->current.bytes && !v->outstanding) {
             v->current=v->next;memset(&v->next,0,sizeof(v->next));
             if(v->current.data) ndspChnSetFormat(i,v->current.channels==2?NDSP_FORMAT_STEREO_PCM16:NDSP_FORMAT_MONO_PCM16);
@@ -316,6 +550,15 @@ void n3ds_audio_update(void)
             ++underruns;
 #ifdef HALO_N3DS_ALGORITHM_PROFILE
             ++profile_drains;
+            if (drain_logs<16) {
+                struct n3ds_algorithm_profile_context context;
+                n3ds_algorithm_profile_snapshot(&context);
+                char message[250];
+                snprintf(message,sizeof(message),"AUDIO REFILL DRAIN: loop=%llu tick=%ld voice=%d gap_us=%llu retired_packets=%u retired_frames=%u rate_hz=%.1f remaining_bytes=%u",
+                    context.loop,context.tick,i,gap*1000000/SYSCLOCK_ARM11,retired_packets,retired_frames,v->rate,c->bytes-c->offset);
+                n3ds_log(message);
+                ++drain_logs;
+            }
 #endif
         }
         for(int p=0;p<PACKETS && c->offset<c->bytes;++p) if(v->wave[p].status==NDSP_WBUF_FREE) {

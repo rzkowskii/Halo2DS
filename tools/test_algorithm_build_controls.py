@@ -84,10 +84,30 @@ class BuildControls(unittest.TestCase):
             ['--algo-water-base', 'verify'],
             ['--algo-uv-outputs', 'verify'],
             ['--algo-boolean-selectors', 'verify'],
+            ['--algo-chicago-map-uv', 'verify'],
+            ['--algo-chicago-alpha-zero', 'verify'],
+            ['--algo-model-reflection-direct', 'verify'],
+            ['--algo-model-homogeneous', 'verify'],
+            ['--algo-effect-homogeneous', 'verify'],
+            ['--algo-model-clip-bounds', 'verify'],
+            ['--algo-bsp-clip-blocks', 'verify'],
+            ['--algo-bsp-clip-hierarchy', 'candidate'],
+            ['--algo-bsp-clip-hierarchy', 'verify'],
+            ['--a30-render-suite'],
+            ['--byte-model-indices'],
+            ['--byte-model-indices', '--a30-benchmark', '--performance-profile', '--fixed-world-width', '400',
+             '--disable-resident-indices'],
+            ['--probe-late-sky'],
+            ['--fixed-world-width', '400', '--gpu-probe', '--probe-late-sky', '--probe-world-pixel-passes'],
+            ['--probe-opaque-terrain-alpha'],
+            ['--fixed-world-width', '400', '--gpu-probe', '--probe-opaque-terrain-alpha', '--probe-late-sky'],
+            ['--a30-render-suite', '--a30-benchmark', '--performance-profile', '--present-60',
+             '--algo-model-reflection-direct', 'candidate'],
             ['--algo-midpoint-particles', 'candidate'],
+            ['--algo-midpoint-swap-overlap', 'candidate'],
+            ['--present-60', '--algo-midpoint-swap-overlap', 'verify'],
             ['--allocation-profile'],
             ['--action-replay-fixture-ticks', '100'],
-            ['--algo-prepared-view', 'candidate'],
             ['--algo-midpoint-quaternions', 'verify'],
             ['--midpoint-capture-tick', '-1'],
             ['--midpoint-capture-tick', '2147483648'],
@@ -103,9 +123,12 @@ class BuildControls(unittest.TestCase):
             ['--unused-texture-units', '--fixed-world-width', '320'],
             ['--unused-texture-units', '--fixed-world-width', '400', '--gpu-probe', '--skip-opaque-color-reads'],
             ['--unused-texture-units', '--fixed-world-width', '400', '--gpu-probe', '--framebuffer-reuse'],
+            ['--probe-neutral-model-tint', '--fixed-world-width', '400'],
+            ['--probe-world-pixel-passes', '--fixed-world-width', '400'],
+            ['--gpu-probe', '--fixed-world-width', '400', '--probe-pixel-passes', '--probe-world-pixel-passes'],
         ]
         candidates = ('--framebuffer-reuse', '--skip-opaque-color-reads', '--unused-texture-units',
-                      '--texture-vram-mirrors')
+                      '--texture-vram-mirrors', '--probe-neutral-model-tint')
         for first, second in itertools.combinations(candidates, 2):
             cases.append(['--gpu-probe', '--fixed-world-width', '400', first, second])
         cases.extend([['--texture-vram-mirrors'], ['--texture-vram-mirrors', '--fixed-world-width', '320']])
@@ -141,6 +164,27 @@ class BuildControls(unittest.TestCase):
                         self.assertEqual(result.returncode, 2, result.stderr)
                         self.assertIn('Missing dependency:', result.stderr)
                         self.assertIn(str(missing), result.stderr)
+
+    def test_startup_diagnostics_selects_its_own_capture_settings(self):
+        with tempfile.TemporaryDirectory(prefix='halo-startup-build-guards-') as directory:
+            missing = Path(directory) / 'missing-devkitarm'
+            for preset in ('--startup-diagnostics', '--startup-diagnostics-optimized'):
+                output = Path(directory) / preset.removeprefix('--')
+                command = [sys.executable, str(BUILD), '--output', str(output),
+                           '--devkitarm', str(missing), preset]
+                for extra in (['--test-frames', '30'], ['--fixed-world-width', '400'],
+                              ['--performance-profile'], ['--dependency-trace-loops', '1'],
+                              ['--probe-pixel-passes'], ['--action-replay', 'record'],
+                              ['--algo-model-clip-bounds', 'candidate']):
+                    with self.subTest(preset=preset, extra=extra):
+                        result = subprocess.run(command + extra, capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, 2, result.stderr)
+                        self.assertIn('selects its own renderer and capture settings', result.stderr)
+                        self.assertFalse(output.exists())
+                result = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('Missing dependency:', result.stderr)
+                self.assertIn(str(missing), result.stderr)
 
     def test_direct_compiler_capture_guards(self):
         compiler = os.environ.get('CC') or shutil.which('cc')
@@ -178,6 +222,22 @@ class BuildControls(unittest.TestCase):
                           'HALO_N3DS_UNUSED_TEXTURE_UNITS=1'):
             cases.append((mirrors + [companion], True))
             cases.append((mirrors + [companion, 'HALO_N3DS_GPU_PROBE=1'], False))
+        startup_options = (
+            'STARTUP_DIAGNOSTICS', 'PERFORMANCE_PROFILE', 'ALGORITHM_PROFILE', 'ALLOCATION_PROFILE',
+            'DEPENDENCY_TRACE', 'GPU_PROBE', 'FRAMEBUFFER_REUSE', 'OPAQUE_COLOR_READS',
+            'UNUSED_TEXTURE_UNITS', 'PROBE_EFFECT_ALPHA_ZERO', 'PROBE_NEUTRAL_MODEL_TINT',
+            'PROBE_TEXTURE_REBINDS', 'PROBE_PIXEL_PASSES', 'PROBE_WORLD_PIXEL_PASSES',
+            'PROBE_RADAR_INLINE_CLEAR',
+        )
+        startup = common + ['HALO_N3DS_FIXED_WORLD_WIDTH=400']
+        startup.extend(f'HALO_N3DS_{option}=1' for option in startup_options)
+        cases.extend([
+            (startup, True),
+            ([define for define in startup if define != 'HALO_N3DS_STARTUP_DIAGNOSTICS=1'], False),
+            ([define for define in startup if define != 'HALO_N3DS_DEPENDENCY_TRACE=1'], False),
+            (startup + ['HALO_N3DS_MIDPOINT_CAPTURE_TICK=300'], False),
+            (startup + ['HALO_N3DS_TEXTURE_VRAM_MIRRORS=1'], False),
+        ])
         for defines, valid in cases:
             with self.subTest(defines=defines):
                 result = subprocess.run([compiler, '-x', 'c', '-fsyntax-only', '-', '-I',

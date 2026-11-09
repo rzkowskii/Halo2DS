@@ -9,7 +9,7 @@ int n3ds_presentation_midpoint_active(void);
 /* Mark the optional frame unusable before doing any non-resident work. */
 int n3ds_presentation_reject_texture(void);
 int n3ds_presentation_check_midpoint(void);
-enum { NATIVE_MIDPOINT_TEXTURE = 1, NATIVE_MIDPOINT_DEADLINE };
+enum { NATIVE_MIDPOINT_TEXTURE = 1, NATIVE_MIDPOINT_DEADLINE, NATIVE_MIDPOINT_SWAP };
 extern int n3ds_presentation_reject_reason;
 static inline int n3ds_presentation_midpoint_rejected(void)
 {

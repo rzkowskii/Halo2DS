@@ -7,6 +7,7 @@
 #include "sound/game_sound.h"
 #include "cache/sound_cache.h"
 #include "engine_audio.h"
+#include "engine_sounds.h"
 struct platform_sound_channel_properties {real minimum_distance,maximum_distance,pitch,gain,cone_inside_angle,cone_outside_angle,cone_outside_gain,reverb_attenuation;};
 struct platform_sound_listener_properties {real_point3d position;real_vector3d forward,up,velocity;const void *environment;};
 struct sound_platform_definition {
@@ -102,6 +103,7 @@ static void queue(short i,struct sound_permutation *p)
      * rejected request leaves the platform's existing queue unchanged. */
     if(v->queued) {sound_cache_sound_hardware_unlock(v->queued);v->queued=NULL;}
     if(v->playing) v->queued=p;else v->playing=p;
+    n3ds_engine_sound_stage_next(p);
     if(queued_count<96 || !(queued_count%128)) {char text[240];snprintf(text,sizeof(text),"AUDIO QUEUE: channel=%d tag=%08lx compression=%d bytes=%ld sample=%.32s name=%.110s",i,p->unknown3,p->compression,p->samples.size,p->name,tag_get_name(p->unknown3));n3ds_log(text);}++queued_count;
 }
 static void begin(void) {n3ds_audio_update();for(short i=0;live && i<24;++i) refresh(i);}

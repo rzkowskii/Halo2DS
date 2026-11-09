@@ -26,6 +26,13 @@ static shaderProgram_s program;
 static int ready,location;
 static struct {DVLB_s *binary;shaderProgram_s program;int ready,projection,bone,uv;} transform_programs[2];
 static C3D_AttrInfo chicago_attributes,transform_attributes[2];
+#ifdef HALO_N3DS_A30_BENCHMARK
+static unsigned int transform_map_draws[3], transform_map_elements[3];
+static unsigned int alpha_zero_draws[2];
+#endif
+#if HALO_N3DS_ALGO_CHICAGO_MAP_UV == N3DS_ALGORITHM_CANDIDATE
+enum { CHICAGO_SECOND_MAP_BOOL=0x68, CHICAGO_THIRD_MAP_BOOL=0x69 };
+#endif
 enum { CHICAGO_RECIPE_SLOTS=16 };
 static struct {
     struct native_chicago_material key;
@@ -39,6 +46,13 @@ static unsigned int used;
 _Static_assert(NATIVE_GENERIC_SAMPLE_SIZE>0 && BAKE_SIZE%NATIVE_GENERIC_SAMPLE_SIZE==0,"Integral generic sample grid");
 #define BAKE_SLOTS 32
 static C3D_Tex baked[BAKE_SLOTS];
+#if defined(HALO_N3DS_A30_BENCHMARK) || HALO_N3DS_ALGO_CHICAGO_NEUTRAL_DRAWS == N3DS_ALGORITHM_CANDIDATE
+#define CHICAGO_TRACK_NEUTRAL_DRAWS 1
+static unsigned int baked_pixel_or[BAKE_SLOTS];
+#endif
+#ifdef HALO_N3DS_A30_BENCHMARK
+static unsigned int neutral_fades, neutral_bakes, neutral_elements;
+#endif
 /* Outputs may remain resident between frames, but must never be rewritten
  * after a draw has referenced them in the current frame (including eye two).
  * A source is reusable only when its owner published immutable texels. */
@@ -52,6 +66,16 @@ static struct {
 static unsigned int baked_count;
 static uint64_t bake_frame=1;
 static unsigned int bake_requests,bake_hits,bake_uncached,bake_texels,bake_full,bake_shield_texels;
+#ifdef HALO_N3DS_PRESENT_INTERPOLATION
+/* These 8x8 textures keep changing sky inputs out of the regular bake LRU.
+ * An acquired frame owns each used slot until its queue retires or is discarded. */
+enum { MIDPOINT_SKY_BAKE_SLOTS=4 };
+static C3D_Tex midpoint_sky_bakes[MIDPOINT_SKY_BAKE_SLOTS];
+#ifdef CHICAGO_TRACK_NEUTRAL_DRAWS
+static unsigned int midpoint_sky_pixel_or[MIDPOINT_SKY_BAKE_SLOTS];
+#endif
+static unsigned int midpoint_sky_count,midpoint_sky_used,midpoint_sky_baked;
+#endif
 static void bake_report(void)
 {
     if(!bake_requests) return;
@@ -60,10 +84,23 @@ static void bake_report(void)
     snprintf(message,sizeof(message),"GENERIC BAKE CACHE: requests=%u hits=%u uncached=%u evaluated_texels=%u full=%u slots=%u shield_texels=%u",
         bake_requests,bake_hits,bake_uncached,bake_texels,bake_full,baked_count,bake_shield_texels);
     n3ds_log(message);
+#ifdef HALO_N3DS_PRESENT_INTERPOLATION
+    if(midpoint_sky_baked) {
+        snprintf(message,sizeof(message),"MIDPOINT SKY BAKE: images=%u reserved_slots=%u",
+            midpoint_sky_baked,midpoint_sky_count);
+        n3ds_log(message);
+    }
+#endif
 }
 void n3ds_gpu_chicago_map_release(void)
 {
     bake_report();
+#ifdef HALO_N3DS_A30_BENCHMARK
+    memset(transform_map_draws,0,sizeof(transform_map_draws));
+    memset(transform_map_elements,0,sizeof(transform_map_elements));
+    memset(alpha_zero_draws,0,sizeof(alpha_zero_draws));
+    neutral_fades=neutral_bakes=neutral_elements=0;
+#endif
     memset(chicago_recipes,0,sizeof(chicago_recipes));chicago_recipe_next=chicago_recipe_last=0;
     for(unsigned int i=0;i<baked_count;++i) {
         n3ds_gpu_texture_revision_begin(&baked[i]);C3D_TexDelete(&baked[i]);
@@ -71,6 +108,9 @@ void n3ds_gpu_chicago_map_release(void)
     memset(baked,0,sizeof(baked));memset(bake_cache,0,sizeof(bake_cache));
     baked_count=0;bake_frame=1;
     bake_requests=bake_hits=bake_uncached=bake_texels=bake_full=bake_shield_texels=0;
+#ifdef HALO_N3DS_PRESENT_INTERPOLATION
+    midpoint_sky_baked=0;
+#endif
 }
 void n3ds_gpu_chicago_dispose(void)
 {
@@ -87,6 +127,13 @@ void n3ds_gpu_chicago_dispose(void)
     if(shader) DVLB_Free(shader);
     linearFree(stream); stream=NULL; shader=NULL; ready=0; used=0;
     n3ds_gpu_chicago_map_release();
+#ifdef HALO_N3DS_PRESENT_INTERPOLATION
+    for(unsigned int i=0;i<midpoint_sky_count;++i) {
+        n3ds_gpu_texture_revision_begin(&midpoint_sky_bakes[i]);
+        C3D_TexDelete(&midpoint_sky_bakes[i]);
+    }
+    midpoint_sky_count=midpoint_sky_used=0;
+#endif
 }
 int n3ds_gpu_chicago_initialize(void)
 {
@@ -122,14 +169,51 @@ int n3ds_gpu_chicago_initialize(void)
         transform_programs[i].uv=shaderInstanceGetUniformLocation(v,"uv_rows");
         if(transform_programs[i].projection<0 || transform_programs[i].bone<0 || transform_programs[i].uv<0) goto fail;
     }
+#ifdef HALO_N3DS_PRESENT_INTERPOLATION
+    if(n3ds_platform_is_new_2ds_xl()) {
+        while(midpoint_sky_count<MIDPOINT_SKY_BAKE_SLOTS &&
+              C3D_TexInit(&midpoint_sky_bakes[midpoint_sky_count],BAKE_SIZE,BAKE_SIZE,GPU_RGBA8))
+            ++midpoint_sky_count;
+    }
+#endif
     return 1;
 fail: n3ds_gpu_chicago_dispose(); return 0;
 }
 void n3ds_gpu_chicago_frame_begin(void)
 {
     used=0;++bake_frame;
+#ifdef HALO_N3DS_PRESENT_INTERPOLATION
+    midpoint_sky_used=0;
+#endif
 #ifdef HALO_N3DS_RENDERER_TESTS
     if(bake_frame%300==0) bake_report();
+#endif
+#ifdef HALO_N3DS_A30_BENCHMARK
+    if(bake_frame%120==0 && (transform_map_draws[0] || transform_map_draws[1] || transform_map_draws[2])) {
+        char message[160];
+        snprintf(message,sizeof(message),"CHICAGO MAP PROFILE: draws=%u/%u/%u elements=%u/%u/%u",
+            transform_map_draws[0],transform_map_draws[1],transform_map_draws[2],
+            transform_map_elements[0],transform_map_elements[1],transform_map_elements[2]);
+        n3ds_log(message);
+        memset(transform_map_draws,0,sizeof(transform_map_draws));
+        memset(transform_map_elements,0,sizeof(transform_map_elements));
+    }
+    if(bake_frame%120==0 && (neutral_fades || neutral_bakes)) {
+        char message[144];
+        snprintf(message,sizeof(message),"CHICAGO NEUTRAL PROFILE: fade=%u bake=%u elements=%u omitted=%u",
+            neutral_fades,neutral_bakes,neutral_elements,
+            HALO_N3DS_ALGO_CHICAGO_NEUTRAL_DRAWS==N3DS_ALGORITHM_CANDIDATE?neutral_fades+neutral_bakes:0);
+        n3ds_log(message);
+        neutral_fades=neutral_bakes=neutral_elements=0;
+    }
+    if(bake_frame%120==0 && (alpha_zero_draws[0] || alpha_zero_draws[1])) {
+        char message[136];
+        snprintf(message,sizeof(message),"CHICAGO ALPHA PROFILE: world=%u sky=%u tested=%u",
+            alpha_zero_draws[0],alpha_zero_draws[1],
+            HALO_N3DS_ALGO_CHICAGO_ALPHA_ZERO==N3DS_ALGORITHM_CANDIDATE?alpha_zero_draws[0]+alpha_zero_draws[1]:0);
+        n3ds_log(message);
+        memset(alpha_zero_draws,0,sizeof(alpha_zero_draws));
+    }
 #endif
 }
 /* Called before native FrameEnd; FrameBegin waits before this arena is reused.
@@ -175,7 +259,7 @@ static int bake_find(const struct native_generic_material *m,const float bounds[
            !memcmp(&bake_cache[i].material,m,sizeof(*m))) return (int)i;
     return -1;
 }
-int n3ds_gpu_generic_bake_preflight(const struct native_generic_material *m,const float bounds[4],int kind)
+int n3ds_gpu_generic_bake_preflight(const struct native_generic_material *m,const float bounds[4],int kind,int sky)
 {
 #ifdef HALO_N3DS_PRESENT_INTERPOLATION
     if(!n3ds_presentation_midpoint_active()) return 1;
@@ -187,13 +271,14 @@ int n3ds_gpu_generic_bake_preflight(const struct native_generic_material *m,cons
         if(!identity[i]) goto miss;
     }
     if(bake_find(m,bounds,kind,identity)>=0) return 1;
+    if(sky && !kind && m->maps==4 && midpoint_sky_used<midpoint_sky_count) return 1;
 miss:
     n3ds_presentation_reject_texture();return 0;
 #else
-    (void)m;(void)bounds;(void)kind;return 1;
+    (void)m;(void)bounds;(void)kind;(void)sky;return 1;
 #endif
 }
-static void *bake_material(const struct native_generic_material *m,const float bounds[4],int meter)
+static void *bake_material(const struct native_generic_material *m,const float bounds[4],int meter,int sky)
 {
     if(!ready || !n3ds_generic_validate(m)) return NULL;
     if(meter==2 && !n3ds_generic_shield(m)) return NULL;
@@ -216,26 +301,51 @@ static void *bake_material(const struct native_generic_material *m,const float b
         return &baked[resident];
     }
     if(!reusable) ++bake_uncached;
-    if(n3ds_presentation_reject_texture()) return NULL;
-    unsigned int slot=baked_count;
-    if(slot==BAKE_SLOTS) {
-        uint64_t oldest=bake_frame;
-        for(unsigned int i=0;i<baked_count;++i) if(bake_cache[i].last_frame<oldest) {
-            oldest=bake_cache[i].last_frame;slot=i;
+    C3D_Tex *t=NULL;
+    int transient=0;
+#ifdef CHICAGO_TRACK_NEUTRAL_DRAWS
+    unsigned int *pixel_summary=NULL, pixels_or=0;
+#endif
+#ifdef HALO_N3DS_PRESENT_INTERPOLATION
+    if(sky && !meter && m->maps==4 && reusable && n3ds_presentation_midpoint_active() &&
+       midpoint_sky_used<midpoint_sky_count) {
+        if(n3ds_presentation_check_midpoint()) return NULL;
+        t=&midpoint_sky_bakes[midpoint_sky_used];
+#ifdef CHICAGO_TRACK_NEUTRAL_DRAWS
+        pixel_summary=&midpoint_sky_pixel_or[midpoint_sky_used];
+#endif
+        ++midpoint_sky_used;
+        transient=1;
+        ++midpoint_sky_baked;
+    }
+#else
+    (void)sky;
+#endif
+    if(!transient) {
+        if(n3ds_presentation_reject_texture()) return NULL;
+        unsigned int slot=baked_count;
+        if(slot==BAKE_SLOTS) {
+            uint64_t oldest=bake_frame;
+            for(unsigned int i=0;i<baked_count;++i) if(bake_cache[i].last_frame<oldest) {
+                oldest=bake_cache[i].last_frame;slot=i;
+            }
+            if(slot==BAKE_SLOTS) {++bake_full;return NULL;}
+        } else {
+            if(!C3D_TexInit(&baked[baked_count],BAKE_SIZE,BAKE_SIZE,GPU_RGBA8)) return NULL;
+            ++baked_count;
         }
-        if(slot==BAKE_SLOTS) {++bake_full;return NULL;}
-    } else {
-        if(!C3D_TexInit(&baked[baked_count],BAKE_SIZE,BAKE_SIZE,GPU_RGBA8)) return NULL;
-        ++baked_count;
+        bake_cache[slot].valid=reusable;bake_cache[slot].last_frame=bake_frame;
+        if(reusable) {
+            bake_cache[slot].material=*m;bake_cache[slot].meter=meter;
+            memcpy(bake_cache[slot].identity,identity,sizeof(identity));
+            memcpy(bake_cache[slot].bounds,bounds,sizeof(bake_cache[slot].bounds));
+        }
+        t=&baked[slot];
+#ifdef CHICAGO_TRACK_NEUTRAL_DRAWS
+        pixel_summary=&baked_pixel_or[slot];
+#endif
+        n3ds_gpu_texture_revision_begin(t);
     }
-    bake_cache[slot].valid=reusable;bake_cache[slot].last_frame=bake_frame;
-    if(reusable) {
-        bake_cache[slot].material=*m;bake_cache[slot].meter=meter;
-        memcpy(bake_cache[slot].identity,identity,sizeof(identity));
-        memcpy(bake_cache[slot].bounds,bounds,sizeof(bake_cache[slot].bounds));
-    }
-    C3D_Tex *t=&baked[slot];
-    n3ds_gpu_texture_revision_begin(t);
     /* PICA requires an 8x8 texture. Shade generic materials on a coarser
      * grid, then expand each sample; model meters retain their full grid. */
     unsigned int samples=(meter==1 || meter==3)?BAKE_SIZE:NATIVE_GENERIC_SAMPLE_SIZE;
@@ -276,12 +386,27 @@ static void *bake_material(const struct native_generic_material *m,const float b
         if(meter==1) rgba[3]=texels[0][3];
         unsigned int pixel=0;
         for(int c=0;c<4;++c) pixel|=(unsigned int)(rgba[c]*255.f+.5f)<<(24-c*8);
+#ifdef CHICAGO_TRACK_NEUTRAL_DRAWS
+        pixels_or|=pixel;
+#endif
         for(unsigned int by=0;by<block;++by) for(unsigned int bx=0;bx<block;++bx)
             ((unsigned int *)t->data)[tiled_offset(x*block+bx,BAKE_SIZE-1-(y*block+by),BAKE_SIZE)]=pixel;
     }
+#ifdef CHICAGO_TRACK_NEUTRAL_DRAWS
+    *pixel_summary=pixels_or;
+#endif
     C3D_TexSetFilter(t,GPU_LINEAR,GPU_LINEAR);
-    C3D_TexSetWrap(t,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);C3D_TexFlush(t);
-    n3ds_gpu_texture_revision_publish(t);
+    C3D_TexSetWrap(t,GPU_CLAMP_TO_EDGE,GPU_CLAMP_TO_EDGE);
+    /* Mutable scratch binds invalidate the sampler cache on each use. */
+    if(transient) {
+        if(R_FAILED(GSPGPU_FlushDataCache(t->data,t->size))) {
+            n3ds_presentation_reject_texture();
+            return NULL;
+        }
+    } else {
+        C3D_TexFlush(t);
+        n3ds_gpu_texture_revision_publish(t);
+    }
     return t;
 }
 void n3ds_gpu_generic_sample(const struct native_generic_material *m,int map,float u,float v,float result[4])
@@ -291,13 +416,15 @@ void n3ds_gpu_generic_sample(const struct native_generic_material *m,int map,flo
         m->point[map],m->clamp_u[map],m->clamp_v[map],result);
 }
 void *n3ds_gpu_generic_bake(const struct native_generic_material *m,const float bounds[4])
-{return bake_material(m,bounds,0);}
+{return bake_material(m,bounds,0,0);}
+void *n3ds_gpu_chicago_bake(const struct native_generic_material *m,const float bounds[4],int sky)
+{return bake_material(m,bounds,0,sky);}
 void *n3ds_gpu_meter_bake(const struct native_generic_material *m,const float bounds[4])
-{return bake_material(m,bounds,1);}
+{return bake_material(m,bounds,1,0);}
 void *n3ds_gpu_shield_bake(const struct native_generic_material *m,const float bounds[4])
-{return bake_material(m,bounds,2);}
+{return bake_material(m,bounds,2,0);}
 void *n3ds_gpu_hologram_stream_bake(const struct native_generic_material *m,const float bounds[4])
-{return bake_material(m,bounds,3);}
+{return bake_material(m,bounds,3,0);}
 struct native_chicago_vertex *n3ds_gpu_chicago_allocate(unsigned int count)
 {
     if(!ready || !count || count>VERTICES-used) return NULL;
@@ -517,6 +644,23 @@ static void chicago_recipe_apply(const struct native_chicago_material *m)
     C3D_TexEnvBufUpdate(C3D_Both,0);C3D_TexEnvBufColor(0);
     for(int i=0;i<6;++i)*C3D_GetTexEnv(i)=chicago_recipes[slot].stages[i];
 }
+#ifdef CHICAGO_TRACK_NEUTRAL_DRAWS
+static int bake_channels_are_zero(const void *texture,unsigned int mask)
+{
+    /* This is a property of the pixels owned by each bake slot. The slot's
+     * summary is replaced with its texels, including scratch and mutable
+     * bakes. A cache hit retains both. Do not infer it from a texture format. */
+    uintptr_t offset=(uintptr_t)texture-(uintptr_t)baked;
+    if(offset<baked_count*sizeof(*baked) && !(offset%sizeof(*baked)))
+        return !(baked_pixel_or[offset/sizeof(*baked)]&mask);
+#ifdef HALO_N3DS_PRESENT_INTERPOLATION
+    offset=(uintptr_t)texture-(uintptr_t)midpoint_sky_bakes;
+    if(offset<midpoint_sky_used*sizeof(*midpoint_sky_bakes) && !(offset%sizeof(*midpoint_sky_bakes)))
+        return !(midpoint_sky_pixel_or[offset/sizeof(*midpoint_sky_bakes)]&mask);
+#endif
+    return 0;
+}
+#endif
 static int chicago_draw(const struct native_chicago_material *m,
     struct native_chicago_vertex *vertices,unsigned int vertex_count,
     const unsigned short *indices,unsigned int index_count,const void *gpu_vertices,
@@ -547,6 +691,29 @@ static int chicago_draw(const struct native_chicago_material *m,
     for(int i=0;i<m->maps;++i) {
         textures[i]=n3ds_gpu_texture_bound(i); if(!textures[i] && !m->vertex_color) return 0;
     }
+#ifdef CHICAGO_TRACK_NEUTRAL_DRAWS
+    if(index_count && !(index_count%3) && !m->meter && n3ds_gpu_frame_is_mono() &&
+       !n3ds_gpu_model_stencil_writes() &&
+       (m->blend==NATIVE_BLEND_ALPHA || m->blend==NATIVE_BLEND_ADD || m->blend==NATIVE_BLEND_SUBTRACT)) {
+        /* The draw masks alpha/depth writes. Alpha blending is an identity
+         * at zero source alpha, and add/subtract at zero source RGB. First
+         * person can write stencil even when its color is an identity. */
+        int zero_fade=!m->vertex_fade && (unsigned int)(m->fade*255.f+.5f)==0;
+        int zero_bake=!zero_fade && m->maps==1 && !m->vertex_color && !generic &&
+            bake_channels_are_zero(textures[0],m->blend==NATIVE_BLEND_ALPHA?0xffu:0xffffff00u);
+        if(zero_fade || zero_bake) {
+#ifdef HALO_N3DS_A30_BENCHMARK
+            neutral_fades+=zero_fade;
+            neutral_bakes+=zero_bake;
+            neutral_elements+=index_count;
+#endif
+#if HALO_N3DS_ALGO_CHICAGO_NEUTRAL_DRAWS == N3DS_ALGORITHM_CANDIDATE
+            n3ds_gpu_world_state_restore();
+            return 1;
+#endif
+        }
+    }
+#endif
     if(!gpu_vertices && !m->vertex_color && !m->generic_lit_lerp && m->vertex_fade!=2) for(unsigned int i=0;i<vertex_count;++i)
         for(int c=0;c<4;++c) vertices[i].color[c]=m->vertex_fade?vertices[i].uv[2][0]:1.f;
     if(gpu_vertices) {
@@ -555,7 +722,13 @@ static int chicago_draw(const struct native_chicago_material *m,
         C3D_BindProgram(&transform_programs[skinned].program);
         C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER,transform_programs[skinned].projection,&projection);
         for(unsigned int i=0;i<nodes*3;++i) C3D_FVUnifSet(GPU_VERTEX_SHADER,transform_programs[skinned].bone+i,rows[i*4],rows[i*4+1],rows[i*4+2],rows[i*4+3]-origin[i%3]);
-        for(int i=0;i<6;++i) {
+        int uv_row_count=6;
+#if HALO_N3DS_ALGO_CHICAGO_MAP_UV == N3DS_ALGORITHM_CANDIDATE
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER,CHICAGO_SECOND_MAP_BOOL,m->maps>=2);
+        C3D_BoolUnifSet(GPU_VERTEX_SHADER,CHICAGO_THIRD_MAP_BOOL,m->maps>=3);
+        uv_row_count=2*m->maps;
+#endif
+        for(int i=0;i<uv_row_count;++i) {
             const float *v=uv_rows+i*4;
             C3D_FVUnifSet(GPU_VERTEX_SHADER,transform_programs[skinned].uv+i,v[0],v[1],0,v[3]);
         }
@@ -572,7 +745,16 @@ static int chicago_draw(const struct native_chicago_material *m,
     /* Xbox D3DCULL_CCW rejects counterclockwise faces, rather than keeping
      * them as the front-facing side. */
     C3D_CullFace(m->two_sided?GPU_CULL_NONE:GPU_CULL_FRONT_CCW);
-    C3D_AlphaTest(m->alpha_test,GPU_GREATER,127);
+    int reject_zero_alpha=0;
+#if defined(HALO_N3DS_A30_BENCHMARK) || HALO_N3DS_ALGO_CHICAGO_ALPHA_ZERO == N3DS_ALGORITHM_CANDIDATE
+    /* With SRC_ALPHA / ONE_MINUS_SRC_ALPHA, a zero alpha leaves RGB alone.
+     * Chicago masks alpha/depth writes. Keep authored cutouts, meter blend
+     * and first-person stencil writes on their original tests. */
+    int alpha_zero_eligible=!m->alpha_test && !m->meter && m->blend==NATIVE_BLEND_ALPHA &&
+        !n3ds_gpu_model_stencil_writes();
+    reject_zero_alpha=alpha_zero_eligible && HALO_N3DS_ALGO_CHICAGO_ALPHA_ZERO==N3DS_ALGORITHM_CANDIDATE;
+#endif
+    C3D_AlphaTest(m->alpha_test || reject_zero_alpha,GPU_GREATER,reject_zero_alpha?0:127);
     n3ds_gpu_model_stencil_apply();
     n3ds_gpu_framebuffer_blend(m->blend);
     if(m->meter) {
@@ -594,6 +776,13 @@ static int chicago_draw(const struct native_chicago_material *m,
         skinned?sizeof(struct native_skin_vertex):sizeof(struct native_render_vertex),
         skinned?N3DS_SKIN_ATTRIBUTES:3,skinned?N3DS_SKIN_PERMUTATION:0x210):
         n3ds_gpu_indexed_draw(vertices,indices,index_count,sizeof(*vertices),5,0x43210);
+#ifdef HALO_N3DS_A30_BENCHMARK
+    if(result && alpha_zero_eligible) ++alpha_zero_draws[!!m->sky];
+    if(result && gpu_vertices) {
+        ++transform_map_draws[m->maps-1];
+        transform_map_elements[m->maps-1]+=index_count;
+    }
+#endif
     for(int i=0;i<m->maps && !m->vertex_color;++i) n3ds_gpu_texture_bind(i,textures[i]);
     n3ds_gpu_world_state_restore();
     return result;

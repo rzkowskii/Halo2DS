@@ -122,6 +122,9 @@ symbols in this file:
 #ifdef HALO_N3DS_PRESENT_INTERPOLATION
 #include "engine_presentation.h"
 #endif
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+#include "engine_renderer.h"
+#endif
 
 /* ---------- constants */
 
@@ -480,6 +483,16 @@ static boolean render_objects_with_environment(void (*environment)(const void *)
                 n3ds_gpu_model_batch_flush();
 #endif
                 environment(context);
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+				if (n3ds_sky_draw_pending())
+				{
+					rasterizer_models_end();
+					n3ds_gpu_late_sky_mask(TRUE);
+					n3ds_draw_pending_sky();
+					n3ds_gpu_late_sky_mask(FALSE);
+					rasterizer_models_begin(FALSE);
+				}
+#endif
 #if N3DS_MISSION_PROFILE
                 native_stamp=n3ds_engine_ticks();
 #endif

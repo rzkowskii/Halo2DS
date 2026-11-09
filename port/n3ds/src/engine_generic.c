@@ -401,28 +401,38 @@ void n3ds_generic_evaluate_inputs(const struct native_generic_material *m,const 
     if(vertex) memcpy(r+3,vertex,2*4*sizeof(float));
     for(int s=0;s<m->stages;++s) {
         const struct native_generic_stage *t=&m->stage[s];const int *p=t->op;
-        float in[4][4],products[2][4],values[3][4],selector=r[1][3];
+        const int rgb_dest[3]={p[8],p[10],p[12]};
+        const int alpha_dest[3]={p[22],p[23],p[24]};
+        const int select=r[1][3]>=.5f;
+        const unsigned int rgb_live=(rgb_dest[0]?1u:0u) | (rgb_dest[1]?2u:0u) |
+            (rgb_dest[2]?(t->flags&1?1u<<select:3u):0u);
+        const unsigned int alpha_live=(alpha_dest[0]?1u:0u) | (alpha_dest[1]?2u:0u) |
+            (alpha_dest[2]?(t->flags&2?1u<<select:3u):0u);
+        float rgb[2][3],alpha[2];
         memcpy(r+9,t->constant,sizeof(t->constant));
-        for(int i=0;i<4;++i) for(int c=0;c<4;++c) {
-            int offset=(c==3?14:0)+i*2;
-            in[i][c]=input(r,p[offset],p[offset+1],c);
+        for(int j=0;j<2;++j) {
+            const int *term=p+j*4;
+            if(rgb_live&(1u<<j)) for(int c=0;c<3;++c)
+                rgb[j][c]=input(r,term[0],term[1],c)*input(r,term[2],term[3],c);
+            if(alpha_live&(1u<<j))
+                alpha[j]=input(r,term[14],term[15],3)*input(r,term[16],term[17],3);
         }
-        for(int j=0;j<2;++j) for(int c=0;c<4;++c)
-            products[j][c]=in[j*2][c]*in[j*2+1][c];
-        for(int c=0;c<4;++c) {
-            int mux=t->flags&(c==3?2:1);
-            values[2][c]=mux?products[selector>=.5f][c]:products[0][c]+products[1][c];
-            values[0][c]=products[0][c];values[1][c]=products[1][c];
+        /* Latch live inputs before publishing AB, CD and SUM in order. SUM
+         * uses the component products even when AB/CD publish dot products. */
+        for(int j=0;j<2;++j) {
+            if(rgb_dest[j]) {
+                float *dest=r[rgb_dest[j]];
+                if(p[9+j*2]) {
+                    float dot=output(rgb[j][0]+rgb[j][1]+rgb[j][2],p[13]);
+                    dest[0]=dest[1]=dest[2]=dot;
+                } else for(int c=0;c<3;++c) dest[c]=output(rgb[j][c],p[13]);
+            }
+            if(alpha_dest[j]) r[alpha_dest[j]][3]=output(alpha[j],p[25]);
         }
-        for(int j=0;j<2;++j) if(p[9+j*2]) {
-            float dot=products[j][0]+products[j][1]+products[j][2];
-            for(int c=0;c<3;++c) values[j][c]=dot;
-        }
-        /* Fetch all inputs before publishing any RGB/alpha destination. */
-        for(int j=0;j<3;++j) for(int c=0;c<4;++c) {
-            int d=p[c==3?22+j:8+j*2];
-            if(d) r[d][c]=output(values[j][c],p[c==3?25:13]);
-        }
+        if(rgb_dest[2]) for(int c=0;c<3;++c)
+            r[rgb_dest[2]][c]=output(t->flags&1?rgb[select][c]:rgb[0][c]+rgb[1][c],p[13]);
+        if(alpha_dest[2])
+            r[alpha_dest[2]][3]=output(t->flags&2?alpha[select]:alpha[0]+alpha[1],p[25]);
     }
     for(int c=0;c<4;++c) result[c]=clamp(r[1][c],0,1);
 }

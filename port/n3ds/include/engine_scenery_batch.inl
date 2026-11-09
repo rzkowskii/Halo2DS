@@ -4,7 +4,13 @@
 #define SCENERY_INSTANCES 8
 #define SCENERY_BATCH_CACHE 32
 #define SCENERY_BATCH_GROUPS 16
-static struct scenery_batch_mesh {const void *source,*key;unsigned int count,indices;struct native_skin_vertex *v;struct native_render_vertex *rigid;unsigned short *i;} scenery_batch_meshes[SCENERY_BATCH_CACHE];
+static struct scenery_batch_mesh {
+ const void *source,*key;unsigned int count,indices;
+ struct native_skin_vertex *v;struct native_render_vertex *rigid;unsigned short *i;
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+ struct n3ds_model_clip_box clip_box;
+#endif
+} scenery_batch_meshes[SCENERY_BATCH_CACHE];
 /* Optional allocation failures must not occupy permanent resident-mesh slots. */
 static struct scenery_batch_rejection {const void *source,*key;unsigned int count,indices;} scenery_batch_rejections[SCENERY_BATCH_CACHE];
 static unsigned int scenery_batch_rejection_next;
@@ -49,6 +55,10 @@ static struct scenery_batch_mesh *scenery_batch_mesh_get(const void *source,cons
   return NULL;
  }
  memcpy(slot->rigid,v,count*sizeof(*v));n3ds_gpu_geometry_flush(slot->rigid,count*sizeof(*v));
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+ unsigned int clip_mask=0;
+ for(unsigned int i=0;i<count;++i) n3ds_model_clip_include(&slot->clip_box,&clip_mask,0,v[i].position);
+#endif
  for(unsigned int j=0;j<SCENERY_INSTANCES;++j){
   for(unsigned int k=0;k<count;++k){
    struct native_skin_vertex *out=slot->v+j*count+k;
@@ -62,6 +72,11 @@ static struct scenery_batch_mesh *scenery_batch_mesh_get(const void *source,cons
 static void scenery_batch_submit(struct scenery_batch_group *g)
 {
  if(!g->count)return;
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+ /* Keep the group and its original draw order. Cull only a complete batch. */
+ if(!first_person_active && model_clip_reject(&g->mesh->clip_box,(1u<<g->count)-1,
+     g->rows,g->mesh->indices*g->count,1)) {g->count=0;return;}
+#endif
  g->material.lighting=&g->lighting;
  const void *vertices=g->count==1?(const void *)g->mesh->rigid:g->mesh->v;
  assert(n3ds_gpu_model_scenery_draw_resident(vertices,g->mesh->i,g->mesh->indices*g->count,
@@ -104,6 +119,11 @@ void n3ds_scenery_report(void)
 {
  char line[200];snprintf(line,sizeof(line),"SCENERY WORK: triangles_saved=%u vertices_saved=%u instanced=%u draws=%u avoided=%u mesh_bytes=%u batch_bytes=%u",scenery_saved_triangles,scenery_saved_vertices,scenery_batch_instances,scenery_batch_draws,scenery_batch_avoided,scenery_mesh_bytes,scenery_batch_bytes);n3ds_log(line);
  scenery_saved_triangles=scenery_saved_vertices=scenery_batch_instances=scenery_batch_draws=scenery_batch_avoided=0;
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+ snprintf(line,sizeof(line),"MODEL CLIP CULL: checked=%u draws=%u triangles=%u",
+     model_clip_checks,model_clip_draws,model_clip_triangles);n3ds_log(line);
+ model_clip_checks=model_clip_draws=model_clip_triangles=0;
+#endif
 }
 
 int n3ds_scenery_batch_tests(void)

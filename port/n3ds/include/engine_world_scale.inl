@@ -156,10 +156,19 @@ static void world_target_bind(void)
  C3D_FrameDrawOn(draw_target);
 #endif
  if(world_low_active && !bottom_selected)C3D_SetViewport(0,0,scale_heights[world_scale],scale_widths[world_scale]);
+#ifdef HALO_N3DS_PROBE_PIXEL_PASSES
+ /* FrameDrawOn resets scissor through SetViewport. Reapply the active pass
+  * after each target bind, including the return from the offscreen sensor. */
+ if(gpu_probe_pixel_clip())C3D_SetScissor(GPU_SCISSOR_NORMAL,0,0,1,1);
+#endif
 }
 void n3ds_gpu_world_view_begin(void)
 {
  world_low_active=0;
+#ifdef HALO_N3DS_PROBE_PIXEL_PASSES
+ if(gpu_probe.recording && (world_scale || screen_effect_active))
+  gpu_probe_abort("non-native-world-target");
+#endif
  if((!world_budget_enabled || !world_scale) && !screen_effect_active || diagnostic_mode || world_scale_failed[eye_right])return;
  if(!scaled_target[eye_right]){
   C3D_Tex *t=&scaled_texture[eye_right];

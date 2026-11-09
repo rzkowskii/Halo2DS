@@ -15,7 +15,8 @@ candidate switches and preserves Halo's 30 Hz gameplay logic and rendering.
 | Option | Contract |
 | --- | --- |
 | `--dependency-trace` | Disabled by default. Enables bounded event collection independently of `--performance-profile` and `--algorithm-profile`. |
-| `--dependency-trace-loops N` | Requires trace; accepts 1–18,000 completed frontend loops. If omitted, the trace captures at most 120 completed loops after gameplay first starts. |
+| `--dependency-trace-loops N` | Requires trace. Sets the capture length in completed frontend loops, from 1 to 18,000. The default is 120. |
+| `--dependency-trace-start-tick N` | Requires trace. Starts on the first eligible gameplay loop at or after simulation tick N. Zero keeps the first-gameplay behavior. |
 
 Trace rejects `--test-frames`, `--diagnostics` and `--original-memory`, which
 select readback or validation fixtures. It leaves `--fixed-world-width`,
@@ -43,10 +44,18 @@ capture remains unverified by the build manifest.
 
 ## Capture lifetime and fixed storage
 
-Collection starts at the first gameplay loop. The loop limit counts completed
+Collection starts at the first eligible gameplay loop at or after the configured
+tick. The threshold applies to whichever mission is loaded. A run that exits
+before reaching it produces no trace file. The loop limit counts completed
 frontend loops from that point; it is not a count of simulation ticks, rendered
 frames or newly displayed images. Reaching the limit freezes collection without
 ending gameplay. Storage is fixed and does not grow when the loop limit grows.
+
+For a short A30 dropship capture, start the mission from the beginning and
+use `--fixed-world-width 400 --dependency-trace --dependency-trace-start-tick 1510`.
+An earlier run first logged the dropship's tractor beam around tick 1557.
+The player's route can shift the encounter. Compare the retained tick range
+with the console log before attributing any costs to the dropship.
 
 | Storage | Capacity |
 | --- | --- |

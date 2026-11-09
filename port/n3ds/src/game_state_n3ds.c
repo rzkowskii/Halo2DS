@@ -94,7 +94,7 @@ boolean game_state_write_to_file(void)
         snprintf(message,sizeof(message),"CHECKPOINT SNAPSHOT: stored_bytes=%u main_thread_ms=%.3f",n3ds_save_snapshot_size(snapshot),(n3ds_engine_ticks()-start)*1000./n3ds_engine_tick_frequency());n3ds_log(message);return TRUE;
     }
     n3ds_save_snapshot_release(state.snapshot);state.snapshot=NULL;
-    if(!state.checkpoint)state.checkpoint=fopen("sdmc:/halo-source/state/engine-session.bin","w+b");
+    if(!state.checkpoint)state.checkpoint=fopen("z:\\engine-session.bin","w+b");
     if(!state.checkpoint)return FALSE;
     crc_new(&state.checksum);crc_checksum_buffer(&state.checksum,state.arena,state.bytes);
     n3ds_log("CHECKPOINT: compressed snapshot allocation failed; bounded disk fallback");

@@ -3,7 +3,7 @@
  * vertex welding, texture retention across frames, or mutable index streams. */
 enum { BSP_BATCH_PACKETS=4, BSP_BATCH_SLOTS=16, BSP_BATCH_ENTRY_BYTES=128*1024 };
 struct bsp_draw_packet {
-    const struct native_geometry *owner;
+    struct native_geometry *owner;
     const struct shader *shader;
     int permutation,lightmap_group,lightmap_index;
     void *textures[3];
@@ -18,6 +18,9 @@ struct bsp_merged_geometry {
     struct native_render_vertex *vertices;
     float *light_uv;
     unsigned short *indices;
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+    struct bsp_clip_cache clip;
+#endif
 };
 static struct bsp_draw_packet bsp_packets[BSP_BATCH_PACKETS];
 static struct bsp_merged_geometry bsp_merged[BSP_BATCH_SLOTS];
@@ -122,11 +125,21 @@ static void bsp_batch_flush(void)
             n3ds_algorithm_profile_add(N3DS_ALGORITHM_GPU_BSP_PACKETS_SAVED,bsp_packet_count-1);
             n3ds_algorithm_profile_add(N3DS_ALGORITHM_GPU_BSP_DRAWS_SAVED,
                 original_draws-(merged->count+29999)/30000);
-            bsp_packet_draw(bsp_packets,merged->vertices,merged->light_uv,merged->indices,merged->count);
+            unsigned int count=merged->count;
+            const unsigned short *indices=merged->indices;
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+            indices=bsp_clip_indices(&merged->clip,merged->vertices,indices,&count,merged->count,0);
+#endif
+            if(count) bsp_packet_draw(bsp_packets,merged->vertices,merged->light_uv,indices,count);
         }
         else for(unsigned int p=0;p<bsp_packet_count;++p) {
-            const struct native_geometry *owner=bsp_packets[p].owner;
-            bsp_packet_draw(bsp_packets+p,owner->vertices,owner->light_uv,owner->indices,owner->index_count);
+            struct native_geometry *owner=bsp_packets[p].owner;
+            unsigned int count=owner->index_count;
+            const unsigned short *indices=owner->indices;
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+            indices=bsp_clip_material_indices(owner,indices,&count);
+#endif
+            if(count) bsp_packet_draw(bsp_packets+p,owner->vertices,owner->light_uv,indices,count);
         }
     }
     bsp_packet_count=0;
@@ -155,7 +168,12 @@ static void bsp_batch_release(void)
         char text[192];snprintf(text,sizeof(text),"BSP ADJACENCY CACHE: entries=%u bytes=%u merged_groups=%u packet_calls_saved=%u draw_calls_saved=%u",
             bsp_merged_count,bsp_merged_bytes,bsp_merged_groups,bsp_merged_packets_saved,bsp_merged_draws_saved);n3ds_log(text);
     }
-    for(unsigned int i=0;i<bsp_merged_count;++i) n3ds_gpu_geometry_free(bsp_merged[i].allocation);
+    for(unsigned int i=0;i<bsp_merged_count;++i) {
+        n3ds_gpu_geometry_free(bsp_merged[i].allocation);
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+        bsp_clip_release(&bsp_merged[i].clip);
+#endif
+    }
     memset(bsp_merged,0,sizeof(bsp_merged));memset(bsp_packets,0,sizeof(bsp_packets));
     bsp_merged_count=bsp_merged_bytes=bsp_merge_attempt_frame=0;
     bsp_merged_groups=bsp_merged_packets_saved=bsp_merged_draws_saved=0;

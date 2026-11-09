@@ -174,12 +174,31 @@ static void native_animation_default_translation(const struct animation *, const
 static __attribute__((noinline)) real_point3d animation_read_point(void const *data)
 {
 	real_point3d value;
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS_OPTIMIZED
+	/* Ordinary raw animation records are usually word-aligned. The same
+	 * reader also handles packed tracks, so verify alignment at the read. */
+	if (!((uintptr_t)data & 3u))
+	{
+		__asm__("vldr %0, [%3]\n\tvldr %1, [%3, #4]\n\tvldr %2, [%3, #8]"
+			: "=t"(value.x), "=t"(value.y), "=t"(value.z)
+			: "r"(data), "m"(*(const byte (*)[sizeof(value)])data));
+		return value;
+	}
+#endif
 	__builtin_memcpy(&value, data, sizeof(value));
 	return value;
 }
 static __attribute__((noinline)) real animation_read_real(void const *data)
 {
 	real value;
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS_OPTIMIZED
+	if (!((uintptr_t)data & 3u))
+	{
+		__asm__("vldr %0, [%1]" : "=t"(value)
+			: "r"(data), "m"(*(const byte (*)[sizeof(value)])data));
+		return value;
+	}
+#endif
 	__builtin_memcpy(&value, data, sizeof(value));
 	return value;
 }

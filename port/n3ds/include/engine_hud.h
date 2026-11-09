@@ -1,6 +1,13 @@
 #ifndef N3DS_ENGINE_HUD_H
 #define N3DS_ENGINE_HUD_H
 #include "engine_text.h"
+struct native_touch_rect {
+    unsigned int x,y,width,height;
+};
+struct native_touch_button {
+    struct native_touch_rect screen,tap;
+    unsigned int atlas_x;
+};
 /* Fixed-width ILP32 packet shared by the engine and native GPU compiler. */
 struct native_hud_meter {
     unsigned int minimum,maximum,background,flash;
@@ -17,7 +24,8 @@ struct native_menu_plasma {
 void n3ds_hud_screen(int bottom);
 void n3ds_gpu_hud_layout(int group);
 void n3ds_gpu_hud_sensor_origin(float x,float y,float radius);
-int n3ds_gpu_touch_panel(const unsigned int *pixels,unsigned int revision);
+int n3ds_gpu_touch_panel(const unsigned int *pixels,unsigned int revision,
+    const struct native_touch_button *buttons,unsigned int count);
 int n3ds_gpu_hud_icon_bounds(void *texture,float bounds[4]);
 int n3ds_gpu_menu_plasma(const struct native_menu_plasma *,const struct native_text_vertex [4],float,float);
 int n3ds_gpu_screen_multiply(const struct native_menu_plasma *,const struct native_text_vertex [4],float,float);

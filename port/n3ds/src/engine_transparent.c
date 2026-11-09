@@ -31,7 +31,7 @@ long long n3ds_engine_tick_frequency(void);
 static long long material_ticks[12];
 static unsigned int material_calls[12], material_frames;
 #endif
-enum { EFFECT_BATCH_VERTICES=384 };
+enum { EFFECT_BATCH_VERTICES=N3DS_EFFECT_BATCH_VERTICES };
 /* Groups are consumed synchronously; the GPU copies this bounded staging area
  * into its frame-owned arena before it returns. Never reorder sorted groups. */
 static struct native_widget_vertex effect_vertices[EFFECT_BATCH_VERTICES];
@@ -39,8 +39,11 @@ static struct native_packed_effect_vertex effect_packed[EFFECT_BATCH_VERTICES];
 static float pending_rows[12];
 static real_matrix4x3 pending_rows_source;
 static int pending_rows_valid;
-static unsigned short packed_indices[EFFECT_BATCH_VERTICES*3/2];
+static unsigned short packed_indices[N3DS_EFFECT_QUAD_INDICES];
 static unsigned int pending_index_count,packed_vertices_saved;
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+static int pending_mixed_indices;
+#endif
 static unsigned short effect_indices[EFFECT_BATCH_VERTICES];
 static unsigned int effect_groups,effect_batches,effect_triangles;
 static unsigned int effect_converted,effect_reused,effect_index_reused;
@@ -183,12 +186,20 @@ static void effect_flush(void)
         boolean bound=rasterizer_set_texture_bitmap_data(0,pending_bitmap);
         if(bound || !n3ds_presentation_midpoint_rejected()) {
             assert(bound);
-            assert(n3ds_gpu_effect_packed_indexed_draw(effect_packed,pending_count,packed_indices,pending_index_count,pending_blend,
+            const unsigned short *indices=packed_indices;
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+            const unsigned short *quad_indices=n3ds_gpu_effect_resident_quad_indices();
+            if(quad_indices && !pending_mixed_indices) indices=quad_indices;
+#endif
+            assert(n3ds_gpu_effect_packed_indexed_draw(effect_packed,pending_count,indices,pending_index_count,pending_blend,
                 pending_shader,pending_sampler,pending_geometry,(pending_geometry&(1u<<5))?pending_rows:NULL));
             ++effect_batches;primary_state_active=1;
         }
     }
     pending_count=pending_index_count=0;
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+    pending_mixed_indices=0;
+#endif
 }
 static void effect_close(void)
 {
@@ -249,11 +260,14 @@ static void effect_primary_append(const struct transparent_geometry_group *group
         }
     }
     ++effect_groups;
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+    const unsigned short *quad_indices=n3ds_gpu_effect_resident_quad_indices();
+#endif
     for(unsigned int triangle=0;triangle<(unsigned long)group->triangle_count && !n3ds_presentation_midpoint_rejected();) {
         unsigned int count=quad?MIN((EFFECT_BATCH_VERTICES-pending_count)/4,
             ((unsigned long)group->triangle_count-triangle)/2)*6:
             MIN((EFFECT_BATCH_VERTICES-pending_count)/3,(unsigned long)group->triangle_count-triangle)*3;
-        count=MIN(count,(unsigned int)(EFFECT_BATCH_VERTICES*3/2-pending_index_count));
+        count=MIN(count,(unsigned int)(N3DS_EFFECT_QUAD_INDICES-pending_index_count));
         count-=count%(quad?6:3);
         if(!count) {effect_flush();continue;}
         const struct unlit_vertex *source=view->data;
@@ -263,9 +277,19 @@ static void effect_primary_append(const struct transparent_geometry_group *group
             unsigned int first=triangle/2*4;
             assert(first<=view->count && n<=view->count-first);
             memcpy(effect_packed+pending_count,source+first,n*sizeof(*effect_packed));
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+            if(!quad_indices || pending_mixed_indices)
+#endif
             for(unsigned int i=0;i<count;++i) packed_indices[pending_index_count+i]=pending_count+i/6*4+corners[i%6];
             packed_vertices_saved+=count-n;
         } else {
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+            /* A mixed batch keeps the original boundaries. Materialize the
+             * skipped quad prefix before appending its first non-quad chunk. */
+            if(quad_indices && !pending_mixed_indices && pending_index_count)
+                memcpy(packed_indices,quad_indices,pending_index_count*sizeof(*packed_indices));
+            pending_mixed_indices=1;
+#endif
             if(sequential) assert(effect_sequential_indices(group->dynamic_triangle_buffer_index,view->count,group->triangle_count,triangle,count,effect_indices));
             const unsigned short *idx=triangles?triangles->indices+triangle*3:effect_indices;
             /* Strip corners and indexed particles often repeat vertices.
@@ -411,6 +435,9 @@ boolean rasterizer_transparent_geometry_initialize_aux_buffer(void)
     if(initialized) {
         effect_groups=effect_batches=effect_triangles=effect_merged=pending_count=0;
         effect_converted=effect_reused=effect_index_reused=packed_vertices_saved=pending_index_count=0;
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+        pending_mixed_indices=0;
+#endif
         saved_zsprites=rasterizer_debug_options.zsprites;
         rasterizer_debug_options.zsprites=FALSE;
         flat_particle_reported=FALSE;

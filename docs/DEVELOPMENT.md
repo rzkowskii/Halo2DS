@@ -86,6 +86,51 @@ diagnostics, a frame limit or a test heap.
 
 ### Diagnostic builds
 
+#### Automatic A30 diagnostics on New 3DS and New 2DS XL
+
+Add `--startup-diagnostics --output build/startup-diagnostics` to the
+dependency command above for the reference preset. Use
+`--startup-diagnostics-optimized` for the same test with shorter object
+transforms, aligned animation reads, prepared views, offscreen geometry
+culling, resident byte indices, and background sound-cache reads. Both presets
+use stock shaders and Citro3D command encoders. The report identifies the preset
+and the exact build.
+Install the resulting `Halo3DS.3dsx` as
+`/3ds/Halo Startup Diagnostics/Halo Startup Diagnostics.3dsx` on a prepared
+SD card. Launch **Halo Startup Diagnostics** from Homebrew Launcher and let
+it return on its own. The run allows up to five minutes after startup. Hold
+START+SELECT to end it early and save the partial report.
+
+Both presets load A30 on Normal, drive the opening route, and sample the
+held dropship view at 400×240 with game audio. Checkpoints and settings use
+`/halo-source/diagnostic-state` on the SD card. The report marks any route
+recovery. The optimized preset waits for eligible cold sound samples on the
+background reader. The original sound class policies decide whether late
+sounds start later or expire. Its report counts deferred sound-cache loads
+and synchronous fallbacks. Use `--async-sound-cache` to enable the same
+behavior in a gameplay build on New models.
+
+The report records the boot memory grant, allocator and texture pressure,
+SD and checkpoint timings, CPU and GPU work, and a bounded dependency trace
+summary. On New 2DS XL it also records acknowledgement of regular and
+in-between frames under the normal presentation policy.
+
+After the gameplay sample, it freezes the view and alternates full-render
+references with one GPU variation at a time. Temporary clipping is visible
+during this stage. The report includes queue timing and the affected work
+counts for each phase. Compare each phase with its two neighboring references.
+The fixed-camera results are sensitive to the scene and renderer-only animation.
+Timing includes diagnostic instrumentation. Specialist image captures and
+build-to-build comparisons still use their separate controlled runs.
+
+Send `/halo-startup-diagnostics.log` from the SD root. The last
+`STARTUP DIAGNOSTICS RESULT` line identifies complete, partial, and cancelled
+runs. The previous report rotates to `/halo-startup-diagnostics.previous.log`.
+If a hard hang interrupts the run, also retrieve the diagnostic stall log if
+one was written.
+
+#### Bounded renderer checks
+
 Add `--test-frames 240 --diagnostics --output build/n3ds-diagnostics` to the
 dependency command above for a bounded menu run with renderer checks. Success
 writes `RESULT: PASS` to the game log. This build exits automatically.
@@ -106,16 +151,46 @@ comparison. Change one option at a time and keep each build in its own
 triggers a screen readback during the run. The options are recorded in
 `boot-build.json`.
 
+For a normal versus Dev1 memory comparison, use the same 400×240 A30
+benchmark binary under both grants. Build it with libctru containing the
+heap-clamp fix, which keeps the ordinary heap within its 96 MiB virtual
+address area and assigns excess pages to the auto-sized linear heap. Verify
+the application region and process commit limit in `PERFORMANCE MEMORY`.
+Keep the game's texture-cache budget and Luma boot path the same in both runs.
+[libctru heap-clamp fix](https://github.com/devkitPro/libctru/commit/5290d64375002802f3e5ea8bfc31ea33ec64456d)
+
 | Option | Effect |
 | --- | --- |
 | `--disable-portal-cache` | Recomputes portal projections to provide a control for the default per-view cache. |
 | `--disable-resident-indices` | Stages model and scenery indices in the transient arena. By default on New models, small recurring model lists can reuse an upload in a 256 KiB linear arena. |
+| `--byte-model-indices` | Stores eligible recurring world-model triangle lists as byte indices in the same resident arena. Requires the A30 benchmark and resident indices. Writes `halo-a30-byte-model-indices.log`. |
 | `--fixed-world-width 400` or `--fixed-world-width 320` | Fixes the New-model gameplay viewport at 400×240 or 320×192. Both use the native HUD and the same projected model detail. The smaller world includes the normal upscale pass. |
 | `--present-60` | Enables optional in-between frames during New 2DS XL campaign play. Keeps the world at native 400×240 even when the extra frame is skipped. Use with a playable build and omit `--fixed-world-width`. |
+| `--algo-midpoint-swap-overlap candidate` | With `--present-60`, may record the next optional frame while awaiting acknowledgement of a posted top-screen swap. Writes `halo-a30-present60-swap-overlap.log` in the A30 benchmark. |
 | `--texture-cache-mib 8` | Raises the New-model gameplay byte cap from 4 to 8 MiB. Slot limits are identical. The cache reclaims the extra working set under linear-memory pressure. |
 | `--texture-prefetch` | Prewarms nearby terrain at map entry and enables bounded texture preparation on New models. `--present-60` also enables worker preparation and can prioritize the bitmap that canceled a midpoint. |
 | `--performance-profile` | Records work percentiles, visibility time, texture stages by request type, eviction pressure, and worker time in `halo-source-engine.log`. |
-| `--a30-benchmark` | With `--fixed-world-width 400 --performance-profile`, writes the interactive A30 benchmark's profile to `halo-a30-benchmark.log`. |
+| `--a30-benchmark` | With `--fixed-world-width 400 --performance-profile`, writes `halo-a30-benchmark.log`. With `--present-60 --performance-profile`, uses native 400×240 and writes `halo-a30-present60.log`. |
+| `--a30-render-suite` | Adds prepared views, compact commands, selected shader candidates and cached model and terrain culling to `--a30-benchmark`. With `--present-60`, writes `halo-a30-present60-render-suite-v3.log`. |
+| `--compact-vertex-commands` | Optional A30 candidate. After the first native vertex bind in a command list, emits only Halo's two stream slots and any changed base. Writes `halo-a30-vertex-commands.log`. |
+| `--compact-command-suite` | Enables the A30 vertex, TEV, effect, shader and uniform command reductions together. Writes `halo-a30-present60-command-suite.log` with `--present-60`, or `halo-a30-command-suite.log` at 30 Hz. |
+| `--algo-uv-outputs candidate` | Combines the duplicated UV multiplication in each rigid and skinned lit/reflect vertex program. With the 60 Hz A30 benchmark, writes `halo-a30-present60-uv-outputs.log`. |
+| `--algo-boolean-selectors candidate` | Uses draw-level Boolean shader uniforms for the model reflection, water wave, and glass pose and diffuse selectors. The 60 Hz A30 log is `halo-a30-present60-boolean-selectors.log`. |
+| `--algo-water-base candidate` | Runs the shorter vertex branch for the water base multiply pass. The 60 Hz A30 log is `halo-a30-present60-water-base.log`. |
+| `--algo-model-uv-pack candidate` | Packs the two identical UV pairs in the basic rigid and skin shaders into one PICA output register. The 60 Hz A30 log is `halo-a30-present60-model-uv-pack.log`. |
+| `--algo-model-view-pack candidate` | Uses one write for the XYZ view export in the shared rigid and skinned reflect shaders. The 60 Hz A30 log is `halo-a30-present60-model-view-pack.log`. |
+| `--algo-chicago-map-uv candidate` | Skips unused UV transforms in the rigid and skinned Chicago vertex programs. A30 benchmarks report per-map-count indexed draws and elements in `CHICAGO MAP PROFILE`. The candidate log is `halo-a30-chicago-map-uv.log`. |
+| `--algo-chicago-neutral-draws candidate` | Omits eligible zero-contribution alpha, additive and subtractive Chicago draws. A30 reports hits and omitted draws in `CHICAGO NEUTRAL PROFILE`. The candidate log is `halo-a30-chicago-neutral-draws.log`. |
+| `--algo-chicago-alpha-zero candidate` | Rejects zero-alpha fragments before blending in eligible Chicago materials. `CHICAGO ALPHA PROFILE` reports world, sky and tested draw counts. The candidate log is `halo-a30-chicago-alpha-zero.log`. |
+| `--algo-model-reflection-direct candidate` | Writes color and cube/detail coordinates directly from each branch of the shared rigid and skinned lit shaders. The A30 candidate log is `halo-a30-model-reflection-direct.log`. |
+| `--algo-model-homogeneous candidate` | Uses PICA homogeneous dot products for rigid and weighted model positions and removes three position setup instructions per vertex. The A30 candidate log is `halo-a30-model-homogeneous.log`. |
+| `--algo-effect-homogeneous candidate` | Uses PICA homogeneous dot products for packed particles, Chicago effects, holograms, water and glass. The A30 candidate log is `halo-a30-effect-homogeneous.log`. |
+| `--algo-model-clip-bounds candidate` | Caches per-bone bounds and skips whole ordinary world model draws outside one lateral clip plane in regular mono views. The A30 candidate log is `halo-a30-model-clip-bounds.log`. |
+| `--algo-bsp-clip-blocks candidate` | Caches terrain blocks after cluster filtering and skips blocks outside a lateral clip plane in regular New-model mono views. The A30 candidate log is `halo-a30-bsp-clip-blocks.log`. |
+| `--algo-bsp-clip-hierarchy candidate` | With cached terrain blocks enabled, checks 8-triangle subgroups where a 32-triangle group intersects a clip plane. The A30 candidate log is `halo-a30-bsp-clip-hierarchy.log`. |
+| `--probe-pixel-passes` | With `--fixed-world-width 400 --gpu-probe`, compares paused full renders against one-pixel scissor passes for the 3D scene, later effects, top overlays and bottom screen. Writes `halo-pixel-passes.log`. |
+| `--probe-world-pixel-passes` | With `--fixed-world-width 400 --gpu-probe`, isolates sky, opaque terrain, models, late effects and coronas in separate paused one-pixel scissor phases. Writes `halo-world-pixel-passes.log`. |
+| `--probe-radar-inline-clear` | With `--fixed-world-width 400 --gpu-probe`, compares the radar's GX fill against a draw that clears all four channels in the current list. Writes `halo-radar-inline-clear.log`. |
 | `--dependency-trace` | Independently collects bounded dependency events and exports at shutdown. Default off. Rejects readback, replay, diagnostics and Original-memory fixtures. |
 | `--dependency-trace-loops N` | Requires trace; accepts 1–18,000 completed frontend loops after gameplay first starts, default 120. Stops capture without ending gameplay or enlarging event storage. |
 | `--midpoint-capture-tick N` | Correctness fixture for `--present-60`. Writes at most one midpoint/regular top-target pair with RGBA, raw D24S8 and camera inputs in the 120 ticks starting at N. Use the complete manifest and keep timing and trace flags off. |
@@ -158,6 +233,15 @@ the dropship landing and first contact with the Marines and Sergeant Johnson.
 Continue for 20–30 seconds. Hold START+SELECT to exit and copy
 `halo-a30-benchmark.log` from the SD root before relaunching. Record when
 the slowdown happened and whether it was sustained or a brief hitch.
+
+To compare vertex command size, add only `--compact-vertex-commands` to the
+benchmark build. The candidate writes all 12 descriptors on the first owned
+bind in each list and uses the SDK packet on unowned binds. A common subsequent
+bind uses eight words instead of 40. The candidate reports full and compact
+bind counts at exit. Compare the same encounter and camera path across builds
+and check the HUD and world, especially the radar's command-list split.
+The linked ARM comparison establishes register equality for the tested
+transitions. Native GPU timing and image validation are pending.
 
 ### 60 Hz presentation target
 
@@ -212,12 +296,29 @@ and cover current display/menu resolutions and P8 vector-palette images. Setup
 regenerates older archives; the runtime still accepts v1/v2, with runtime
 lightmap decoding for v1. The regular texture-idle boundary opens the bounded
 index before worker requests search it. Midpoints never open archive files.
+An animated four-map sky can need a new baked image between simulation
+ticks even when every source map is resident. The New 2DS XL renderer
+reserves up to four 8×8 RGBA8 scratch textures at startup for these sky
+bakes. Each bake uses the midpoint's original inputs and sampling. Slots
+are reused only after GPU acquisition. If no slot or source is available,
+the midpoint is discarded and the regular frame can use the normal path.
 
 If the display fails to latch a submitted midpoint within the bounded wait,
 the regular frame still renders and the top LCD retains the last safe buffer.
 `MIDPOINT PRESENT` counts midpoint submissions, observed swap acknowledgments
 for both frame types, and skips by reason. It also reports the separate CPU
 and queue estimates and the CPU time spent on discarded optional frames.
+`MIDPOINT BUDGET` separates cooldown, warm-up, missing samples, keyframe
+queue cost and the two display-slot limits from the serial render limit.
+`MIDPOINT ACQUIRE` separates unavailable GPU rights, unposted and pending
+top swaps, linear headroom, and GPU queue contention. With
+`--algo-midpoint-swap-overlap candidate`, a posted but pending swap owns the
+next refresh. The scheduler may record the midpoint for the following refresh
+if it can still meet the regular frame's deadline. The renderer must observe
+acknowledgement by the midpoint submission deadline or discard the midpoint.
+The late-keyframe, missed-midpoint and texture-change counters describe
+cooldown triggers and can overlap. Shared-camera hits count interpolation
+reused when both culling and rasterizer endpoints match byte for byte.
 The report includes the eligible-frame count and elapsed wall time between
 reports. The first report has no preceding timing boundary and shows zero.
 Interpolation can add presentation latency, so aiming response and the
@@ -438,9 +539,13 @@ textures and lighting.
 [Halo 64 scope](https://github.com/JackTulli/halo-64/blob/c888de759b1a399c72636397e254681f69993d56/README.md#L33-L78)
 · [Halo 64 performance history](https://github.com/JackTulli/halo-64/blob/c888de759b1a399c72636397e254681f69993d56/port/n64/HISTORY.md#L120-L149)
 
-New-model audio can prepare one encoded sample in the background. The usual
-idle or blocking cache request still determines when the sample becomes
-available. With sufficient heap headroom, checkpoints use up to two raw RAM
+New-model audio can stage the next pending sample and two authored continuation
+samples on one background reader. The three buffers grow on demand up to
+256 KiB combined. A spare continuation buffer can hold one nearby selectable
+root from the same linked sound. These hints come from clips accepted into the
+DSP queue and reserve no cache entries. The usual idle or blocking cache request
+still publishes the sample and reads synchronously if staging missed.
+With sufficient heap headroom, checkpoints use up to two raw RAM
 snapshots for immediate revert and move persistent compression to the SD
 writer. The on-disk format and compressed fallback remain available.
 Each packing operation reuses one private LZ4 state across its blocks. Raw

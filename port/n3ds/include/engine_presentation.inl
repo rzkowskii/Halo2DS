@@ -13,13 +13,29 @@ struct presentation_snapshot {
 };
 
 enum { MIDPOINT_SAMPLE_MAX_AGE = 30 };
+enum presentation_budget_gate {
+    MIDPOINT_BUDGET_COOLDOWN,
+    MIDPOINT_BUDGET_STABILITY,
+    MIDPOINT_BUDGET_KEY_SAMPLE,
+    MIDPOINT_BUDGET_KEY_QUEUE,
+    MIDPOINT_BUDGET_BLANK_SAMPLE,
+    MIDPOINT_BUDGET_KEY_SLOT,
+    MIDPOINT_BUDGET_SERIAL_WORK,
+    MIDPOINT_BUDGET_MIDPOINT_SLOT,
+    MIDPOINT_BUDGET_GATE_COUNT,
+};
 static struct {
     struct presentation_snapshot previous;
     long long key_prepare_ticks, midpoint_prepare_ticks, midpoint_submit_deadline;
+    long long midpoint_swap_deadline;
     long long queue_ticks[2];
     long long rejected_ticks;
     unsigned int stable_ticks, cooldown, midpoint_sample_age;
     unsigned int submitted, latched, budget_skips, context_skips, busy_skips, texture_skips, deadline_skips;
+    unsigned int budget_gates[MIDPOINT_BUDGET_GATE_COUNT], shared_cameras;
+    unsigned int acquire_skips[N3DS_MIDPOINT_ACQUIRE_COUNT];
+    unsigned int swap_overlap_attempts, swap_rejects;
+    unsigned int late_keyframes, missed_midpoints, texture_changes;
     unsigned int last_key_latches;
     int has_previous, midpoint;
 } presentation;
@@ -108,8 +124,17 @@ static int presentation_window_midpoint(struct presentation_snapshot *current,
 
     *midpoint = current->window;
     if (!presentation_camera_midpoint(&previous->window.render_camera,
-            &current->window.render_camera, &midpoint->render_camera) ||
-        !presentation_camera_midpoint(&previous->window.rasterizer_camera,
+            &current->window.render_camera, &midpoint->render_camera))
+        return 0;
+    /* Ordinary views share both camera endpoints. Keep the separate
+     * interpolation when either endpoint has a distinct rasterizer view. */
+    if (!memcmp(&previous->window.render_camera, &previous->window.rasterizer_camera,
+            sizeof(previous->window.render_camera)) &&
+        !memcmp(&current->window.render_camera, &current->window.rasterizer_camera,
+            sizeof(current->window.render_camera))) {
+        midpoint->rasterizer_camera = midpoint->render_camera;
+        ++presentation.shared_cameras;
+    } else if (!presentation_camera_midpoint(&previous->window.rasterizer_camera,
             &current->window.rasterizer_camera, &midpoint->rasterizer_camera))
         return 0;
 
@@ -143,28 +168,53 @@ static int presentation_window_midpoint(struct presentation_snapshot *current,
     return location.cluster_index == from_cluster;
 }
 
+static int presentation_budget_skip(enum presentation_budget_gate gate)
+{
+    ++presentation.budget_gates[gate];
+    return 0;
+}
+
 static int presentation_budget_fits(long long tick_start)
 {
-    if (presentation.stable_ticks < 4 || presentation.cooldown) return 0;
+    presentation.midpoint_swap_deadline = 0;
+    if (presentation.cooldown) return presentation_budget_skip(MIDPOINT_BUDGET_COOLDOWN);
+    if (presentation.stable_ticks < 4) return presentation_budget_skip(MIDPOINT_BUDGET_STABILITY);
     long long key_gpu = MAX(presentation.queue_ticks[0], n3ds_gpu_present_cost_ticks(0));
     long long midpoint_gpu = presentation.queue_ticks[1];
     long long refresh = n3ds_gpu_top_refresh_ticks();
-    if (!key_gpu || key_gpu >= refresh) return 0;
+    if (!key_gpu) return presentation_budget_skip(MIDPOINT_BUDGET_KEY_SAMPLE);
+    if (key_gpu >= refresh) return presentation_budget_skip(MIDPOINT_BUDGET_KEY_QUEUE);
     if (!midpoint_gpu) midpoint_gpu = key_gpu;
     long long now = n3ds_engine_ticks();
     long long first_blank = n3ds_gpu_next_top_blank(now);
-    if (!first_blank) return 0;
+    if (!first_blank) return presentation_budget_skip(MIDPOINT_BUDGET_BLANK_SAMPLE);
     long long frequency = n3ds_engine_tick_frequency();
     long long guard = frequency / 500;
+    long long prior_latch = 0;
+#if HALO_N3DS_ALGO_MIDPOINT_SWAP_OVERLAP == N3DS_ALGORITHM_CANDIDATE
+    if (n3ds_gpu_midpoint_prior_swap_pending()) {
+        /* The next blank belongs to the image already posted. Reserve the
+         * following blank for the midpoint and keep the regular tick limit. */
+        prior_latch = first_blank;
+        first_blank += refresh;
+    }
+#endif
     long long key_finish = MIN(tick_start + frequency / 30, first_blank + refresh);
     /* The next buffer cannot transfer until the midpoint has latched. CPU
      * preparation of the key can run between midpoint retirement and VBlank. */
-    if (first_blank + key_gpu + guard >= key_finish) return 0;
-    long long latest_midpoint_done = MIN(first_blank, key_finish - presentation.key_prepare_ticks - key_gpu);
+    if (first_blank + key_gpu + guard >= key_finish) return presentation_budget_skip(MIDPOINT_BUDGET_KEY_SLOT);
+    long long serial_limit = key_finish - presentation.key_prepare_ticks - key_gpu;
+    long long latest_midpoint_done = MIN(first_blank, serial_limit);
     presentation.midpoint_submit_deadline = latest_midpoint_done - midpoint_gpu - guard;
     long long midpoint_cpu = presentation.midpoint_prepare_ticks;
     if (!midpoint_cpu) midpoint_cpu = presentation.key_prepare_ticks;
-    return now + midpoint_cpu < presentation.midpoint_submit_deadline;
+    if (now + midpoint_cpu < presentation.midpoint_submit_deadline &&
+        (!prior_latch || prior_latch + guard < presentation.midpoint_submit_deadline)) {
+        if (prior_latch) presentation.midpoint_swap_deadline = presentation.midpoint_submit_deadline;
+        return 1;
+    }
+    return presentation_budget_skip(serial_limit < first_blank ?
+        MIDPOINT_BUDGET_SERIAL_WORK : MIDPOINT_BUDGET_MIDPOINT_SLOT);
 }
 
 static void presentation_observe(long long tick_start, long long key_begin,
@@ -189,8 +239,13 @@ static void presentation_observe(long long tick_start, long long key_begin,
 
     int latched = submitted && n3ds_gpu_midpoint_latched();
     presentation.latched += latched;
-    if ((submitted && !latched) || now - tick_start + n3ds_gpu_present_cost_ticks(0) >= n3ds_engine_tick_frequency() / 30 ||
-        texture_revision != n3ds_engine_texture_presentation_revision()) {
+    int missed = submitted && !latched;
+    int late_key = now - tick_start + n3ds_gpu_present_cost_ticks(0) >= n3ds_engine_tick_frequency() / 30;
+    int changed = texture_revision != n3ds_engine_texture_presentation_revision();
+    presentation.missed_midpoints += missed;
+    presentation.late_keyframes += late_key;
+    presentation.texture_changes += changed;
+    if (missed || late_key || changed) {
         presentation.cooldown = 8;
         presentation.stable_ticks = 0;
     } else if (rejection) {
@@ -225,9 +280,37 @@ static void presentation_report(long time, int eligible)
         presentation.key_prepare_ticks*ms, presentation.queue_ticks[0]*ms,
         presentation.midpoint_prepare_ticks*ms, presentation.queue_ticks[1]*ms, presentation.rejected_ticks*ms);
     n3ds_log(message);
+    if (presentation.busy_skips || presentation.swap_overlap_attempts || presentation.swap_rejects) {
+        const unsigned int *skips = presentation.acquire_skips;
+        snprintf(message, sizeof(message),
+            "MIDPOINT ACQUIRE: time=%ld context=%u gpu_rights=%u swap_unposted=%u swap_pending=%u headroom=%u queue=%u swap_overlap=%u swap_rejected=%u",
+            time, skips[N3DS_MIDPOINT_ACQUIRE_CONTEXT], skips[N3DS_MIDPOINT_ACQUIRE_GPU_RIGHTS],
+            skips[N3DS_MIDPOINT_ACQUIRE_SWAP_UNPOSTED], skips[N3DS_MIDPOINT_ACQUIRE_SWAP_PENDING],
+            skips[N3DS_MIDPOINT_ACQUIRE_HEADROOM], skips[N3DS_MIDPOINT_ACQUIRE_QUEUE],
+            presentation.swap_overlap_attempts, presentation.swap_rejects);
+        n3ds_log(message);
+        memset(presentation.acquire_skips, 0, sizeof(presentation.acquire_skips));
+    }
+    if (presentation.budget_skips || presentation.shared_cameras || presentation.late_keyframes ||
+        presentation.missed_midpoints || presentation.texture_changes) {
+        const unsigned int *gates = presentation.budget_gates;
+        snprintf(message, sizeof(message),
+            "MIDPOINT BUDGET: time=%ld cooldown=%u stability=%u key_sample=%u key_queue=%u blank_sample=%u key_slot=%u serial_work=%u midpoint_slot=%u shared_cameras=%u late_keyframes=%u missed_midpoints=%u texture_changes=%u",
+            time, gates[MIDPOINT_BUDGET_COOLDOWN], gates[MIDPOINT_BUDGET_STABILITY],
+            gates[MIDPOINT_BUDGET_KEY_SAMPLE], gates[MIDPOINT_BUDGET_KEY_QUEUE],
+            gates[MIDPOINT_BUDGET_BLANK_SAMPLE], gates[MIDPOINT_BUDGET_KEY_SLOT],
+            gates[MIDPOINT_BUDGET_SERIAL_WORK], gates[MIDPOINT_BUDGET_MIDPOINT_SLOT],
+            presentation.shared_cameras, presentation.late_keyframes,
+            presentation.missed_midpoints, presentation.texture_changes);
+        n3ds_log(message);
+    }
     frames = eligible_frames = 0;
     presentation.last_key_latches = key_latches;
     presentation.submitted = presentation.latched = presentation.budget_skips =
         presentation.context_skips = presentation.busy_skips = presentation.texture_skips = presentation.deadline_skips = 0;
     presentation.rejected_ticks = 0;
+    memset(presentation.budget_gates, 0, sizeof(presentation.budget_gates));
+    presentation.shared_cameras = 0;
+    presentation.late_keyframes = presentation.missed_midpoints = presentation.texture_changes = 0;
+    presentation.swap_overlap_attempts = presentation.swap_rejects = 0;
 }

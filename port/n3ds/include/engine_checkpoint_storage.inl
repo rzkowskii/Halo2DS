@@ -22,7 +22,7 @@ extern byte __start__[],__end__[],__exidx_start[];
 #ifndef HALO_N3DS_CHECKPOINT_BUILD
 #define HALO_N3DS_CHECKPOINT_BUILD 0u
 #endif
-enum { STORAGE_MAGIC=0x53503348, STORAGE_VERSION=3, STORAGE_LIMIT=0x345000, MAX_POINTERS=16384 };
+enum { STORAGE_MAGIC=0x53503348, STORAGE_VERSION=3, STORAGE_LIMIT=0x345000, MAX_POINTERS=16384, STORAGE_IO_BUFFER=16384 };
 struct checkpoint_header {
     unsigned int magic,version,header_bytes,payload_bytes;
     unsigned int engine_header_bytes,checksum_offset,pointer_count,payload_crc;
@@ -133,9 +133,9 @@ static int read_payload_block(unsigned int handle,const struct checkpoint_header
     *consumed+=count+4;
     return n3ds_file_read(handle,packed,count) && n3ds_save_unpack(packed,count,block,n);
 }
-static unsigned int open_valid(const char *path,struct checkpoint_header *h,struct game_state_header *engine,boolean *corrupted)
+static unsigned int open_valid(const char *path,struct checkpoint_header *h,struct game_state_header *engine,boolean *corrupted,void *io_buffer)
 {
-    unsigned int handle=n3ds_file_open(path,1),size,consumed=0;unsigned long crc;
+    unsigned int handle=n3ds_file_open_with_buffer(path,1,io_buffer,STORAGE_IO_BUFFER),size,consumed=0;unsigned long crc;
     byte *block=NULL,*packed=NULL;
     if(!handle) return 0;
     size=n3ds_file_size(handle);
@@ -171,8 +171,8 @@ static unsigned int open_checkpoint(char path[256],struct checkpoint_header *h,s
 {
     if(corrupted) *corrupted=FALSE;
     if(!path_for_directory(NULL,path)) return 0;
-    unsigned int handle=open_valid(path,h,engine,corrupted);
-    if(!handle) {strcat(path,".bak");handle=open_valid(path,h,engine,corrupted);
+    unsigned int handle=open_valid(path,h,engine,corrupted,NULL);
+    if(!handle) {strcat(path,".bak");handle=open_valid(path,h,engine,corrupted,NULL);
         if(handle) n3ds_log("CHECKPOINT: using previous complete checkpoint backup");}
     if(handle && corrupted) *corrupted=FALSE;
     return handle;
@@ -210,9 +210,14 @@ static unsigned int checkpoint_write_worker(void *argument)
         if(job->records[i-1].offset==job->records[i].offset) return 0;
     byte *block=(malloc)(32768),*packed=(malloc)(n3ds_save_pack_bound());
     void *codec=(malloc)(n3ds_save_pack_state_bytes());
+    /* Reuse one bounded buffer across the temporary write and the complete
+     * verification of the previous save. Allocation failure uses stdio's
+     * default buffering. */
+    void *io_buffer=(malloc)(STORAGE_IO_BUFFER);
     if(!block || !packed || !codec)goto done;
     snprintf(temp,sizeof(temp),"%s.tmp",path);snprintf(backup,sizeof(backup),"%s.bak",path);
-    if(!n3ds_file_create(temp,0) || !(handle=n3ds_file_open(temp,3)) || !n3ds_file_resize(handle,0) || !n3ds_file_write_buffered(handle,&h,sizeof(h))) goto done;
+    if(!n3ds_file_create(temp,0) || !(handle=n3ds_file_open_with_buffer(temp,3,io_buffer,STORAGE_IO_BUFFER)) ||
+        !n3ds_file_resize(handle,0) || !n3ds_file_write_buffered(handle,&h,sizeof(h))) goto done;
     crc_new(&crc);h.reserved=0;
     for(unsigned int offset=0;offset<STORAGE_LIMIT;) {
         unsigned int n=MIN(32768u,STORAGE_LIMIT-offset);
@@ -232,7 +237,7 @@ static unsigned int checkpoint_write_worker(void *argument)
     if(!n3ds_file_write_buffered(handle,job->records,h.pointer_count*sizeof(*job->records)) || !n3ds_file_write_at(handle,0,&h,sizeof(h))) goto done;
     ok=n3ds_file_close(handle);handle=0;if(!ok) goto done;ok=0;
     struct checkpoint_header old;struct game_state_header old_engine;
-    unsigned int old_handle=open_valid(path,&old,&old_engine,NULL);
+    unsigned int old_handle=open_valid(path,&old,&old_engine,NULL,io_buffer);
     if(old_handle) {
         if(!n3ds_file_close(old_handle)) goto done;
         struct native_file_info info;
@@ -242,7 +247,7 @@ static unsigned int checkpoint_write_worker(void *argument)
     ok=n3ds_file_rename(temp,path);job->header.reserved=h.reserved;
 done:
     if(handle) n3ds_file_close(handle);
-    free(codec);free(block);free(packed);return ok;
+    free(io_buffer);free(codec);free(block);free(packed);return ok;
 }
 static void release_job(struct checkpoint_job_data *job)
 {n3ds_save_snapshot_release(job->snapshot);free(job->records);memset(job,0,sizeof(*job));}

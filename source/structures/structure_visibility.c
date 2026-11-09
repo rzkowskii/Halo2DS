@@ -2014,7 +2014,9 @@ void n3ds_structure_visibility_compute(void)
 #if HALO_N3DS_ALGO_PREPARED_VIEW != N3DS_ALGORITHM_REFERENCE
 boolean n3ds_prepare_visibility_allowed(void)
 {
-	return !debug_portals && !structures_use_pvs_for_vs && !ai_debug.render_encounter_activeregion;
+	extern boolean debug_no_frustum_clip;
+	return !debug_portals && !structures_use_pvs_for_vs && !ai_debug.render_encounter_activeregion &&
+		!debug_no_frustum_clip && (__builtin_arm_get_fpscr() & 0x03ffff00u) == 0x03000000u;
 }
 
 void n3ds_prepare_visibility(const struct render_camera *camera, const struct render_frustum *frustum,

@@ -235,8 +235,18 @@ static void blip_begin(
 	short local_player_index);
 static boolean should_draw_object(
 	long object_index);
+#ifdef HALO_N3DS
+struct motion_sensor_rotation
+{
+	real sine, cosine;
+	boolean valid;
+};
+#endif
 static void render_blip(
 	struct motion_sensor_datum *sensor,
+#ifdef HALO_N3DS
+	struct motion_sensor_rotation *rotation,
+#endif
 	char blip_type,
 	char blip_size_type,
 	real_point2d const *point,
@@ -278,6 +288,38 @@ real scale[] =
 long next_vertex_index= {0};
 static struct motion_sensor_globals_definition *motion_sensor_globals = NULL;
 static real sweep_theta = 0.f;
+#ifdef HALO_N3DS
+static struct { real fade, radius; } history_style[MOTION_SENSOR_HISTORY_COUNT];
+static struct { unsigned int argument; real scale; } distance_cache[256];
+#ifdef HALO_N3DS_PERFORMANCE_PROFILE
+static unsigned int distance_hits, distance_misses;
+#endif
+
+static real radar_distance_scale(real distance)
+{
+	union { real value; unsigned int bits; } input = { .value = distance };
+	unsigned int key = input.bits;
+	/* Cache only finite, positive normal inputs. Other inputs retain the
+	 * original libm domain and exception handling. */
+	if (key < 0x00800000u || key >= 0x7f800000u)
+		return (real)pow(distance, 0.7);
+	unsigned int slot = (key ^ (key >> 8) ^ (key >> 16) ^ (key >> 24)) & 255u;
+	if (distance_cache[slot].argument == key)
+	{
+#ifdef HALO_N3DS_PERFORMANCE_PROFILE
+		++distance_hits;
+#endif
+		return distance_cache[slot].scale;
+	}
+#ifdef HALO_N3DS_PERFORMANCE_PROFILE
+	++distance_misses;
+#endif
+	real scale = (real)pow(distance, 0.7);
+	distance_cache[slot].scale = scale;
+	distance_cache[slot].argument = key;
+	return scale;
+}
+#endif
 boolean debug_motion_sensor_draw_all_units= {0};
 
 extern struct motion_sensor_hud_globals *hud_globals;
@@ -670,11 +712,17 @@ static void render_motion_sensor(
 			MOTION_SENSOR_HISTORY_COUNT);
 		struct motion_sensor_datum *sensor =
 			&player->sensor_data[sensor_index];
+#ifdef HALO_N3DS
+		real fade = history_style[history_index].fade;
+		real radius = history_style[history_index].radius;
+		struct motion_sensor_rotation rotation = {0};
+#else
 		real weight =
 			(real)(MOTION_SENSOR_HISTORY_COUNT - history_index) * 0.1f;
 		real fade = weight * weight;
 		real radius = (real)(
 			power(1.0f - weight, 3.5f) * 7.0 + 1.0);
+#endif
 		short blip_index;
 
 		for (blip_index = 0;
@@ -690,6 +738,9 @@ static void render_motion_sensor(
 				tiny_point2d_get(&blip->position, &point);
 				render_blip(
 					sensor,
+#ifdef HALO_N3DS
+					&rotation,
+#endif
 					blip->type,
 					blip->size,
 					&point,
@@ -716,6 +767,9 @@ static void render_motion_sensor(
 				tiny_point2d_get(&sensor->custom_blips[blip_index], &point);
 				render_blip(
 					sensor,
+#ifdef HALO_N3DS
+					&rotation,
+#endif
 					_blip_type_custom,
 					_hud_blip_type_medium,
 					&point,
@@ -950,12 +1004,31 @@ void motion_sensor_initialize(
 	motion_sensor_globals = (struct motion_sensor_globals_definition *)game_state_malloc("motion sensor (radar)", "sensor data", 5544);
 	match_assert("c:\\halo\\SOURCE\\interface\\motion_sensor.c", 298, motion_sensor_globals);
 
+#ifdef HALO_N3DS
+	/* The style depends only on history age. Evaluate the original float
+	 * expression at initialization instead of calling pow during each draw. */
+	for (short history_index = 0; history_index < MOTION_SENSOR_HISTORY_COUNT; history_index++)
+	{
+		real weight = (real)(MOTION_SENSOR_HISTORY_COUNT - history_index) * 0.1f;
+		history_style[history_index].fade = weight * weight;
+		history_style[history_index].radius =
+			(real)(power(1.0f - weight, 3.5f) * 7.0 + 1.0);
+	}
+#endif
+
 	return;
 }
 
 void motion_sensor_dispose(
 	void)
 {
+#ifdef HALO_N3DS_PERFORMANCE_PROFILE
+	extern void n3ds_log(const char *);
+	char message[112];
+	snprintf(message, sizeof(message), "RADAR DISTANCE CACHE: hits=%u misses=%u", distance_hits, distance_misses);
+	n3ds_log(message);
+	distance_hits = distance_misses = 0;
+#endif
 	return;
 }
 
@@ -1041,6 +1114,9 @@ static boolean should_draw_object(
 
 static void render_blip(
 	struct motion_sensor_datum *sensor,
+#ifdef HALO_N3DS
+	struct motion_sensor_rotation *rotation,
+#endif
 	char blip_type,
 	char blip_size_type,
 	real_point2d const *point,
@@ -1062,11 +1138,27 @@ static void render_blip(
 		410,
 		_blip_type_none != blip_type);
 
+#ifdef HALO_N3DS
+	/* A history slot shares yaw across ordinary and custom contacts.
+	 * Delay the first calculation until the slot has a contact to draw. */
+	if (!rotation->valid)
+	{
+		rotation->sine = sine(-sensor->yaw);
+		rotation->cosine = cosine(-sensor->yaw);
+		rotation->valid = TRUE;
+	}
+	rotate_vector2d(
+		(real_vector2d const *)&blip_position,
+		rotation->sine,
+		rotation->cosine,
+		(real_vector2d *)&blip_position);
+#else
 	rotate_vector2d(
 		(real_vector2d const *)&blip_position,
 		sine(-sensor->yaw),
 		cosine(-sensor->yaw),
 		(real_vector2d *)&blip_position);
+#endif
 
 	distance_squared = magnitude_squared2d((real_vector2d const *)&blip_position);
 	if (distance_squared <
@@ -1081,9 +1173,13 @@ static void render_blip(
 			(real_vector2d const *)&blip_position,
 			1.0f / distance,
 			(real_vector2d *)&blip_position);
+#ifdef HALO_N3DS
+		distance_scale = radar_distance_scale(distance / hud_globals->defaults.motion_sensor_range);
+#else
 		distance_scale = (real)pow(
 			distance / hud_globals->defaults.motion_sensor_range,
 			0.7);
+#endif
 		mapped_distance =
 			hud_globals->defaults.motion_sensor_range * distance_scale;
 		scale_vector2d(

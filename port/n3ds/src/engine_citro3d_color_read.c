@@ -1,11 +1,71 @@
 /* The pinned Citro3D context records framebuffer and fragment state before
  * each draw. Keep its framebuffer shadow intact and track the hardware
  * color-read permission across runs of eligible indexed draws. */
-#if defined(HALO_N3DS_OPAQUE_COLOR_READS) || defined(HALO_N3DS_UNUSED_TEXTURE_UNITS)
+#if defined(HALO_N3DS_OPAQUE_COLOR_READS) || defined(HALO_N3DS_UNUSED_TEXTURE_UNITS) || defined(HALO_N3DS_PROBE_TEXTURE_REBINDS)
 #include <3ds.h>
+#include <string.h>
 #include "internal.h"
 
 void __real_C3Di_UpdateContext(void);
+#ifdef HALO_N3DS_PROBE_TEXTURE_REBINDS
+int n3ds_gpu_probe_texture_rebind_path(void);
+void n3ds_gpu_probe_texture_rebinds(unsigned int eligible,unsigned int elided,int clear);
+int n3ds_gpu_texture_rebind_identity(unsigned int unit,C3D_Tex *sampler,unsigned int *id);
+static struct {
+    const u32 *list;
+    u32 end, units;
+    C3D_Tex sampler[3];
+    unsigned int id[3];
+} texture_rebinds;
+
+void n3ds_gpu_texture_rebind_reset(void)
+{
+    texture_rebinds.list=NULL;
+}
+
+static void texture_rebind_update(void)
+{
+    int path=n3ds_gpu_probe_texture_rebind_path();
+    C3D_Context *context=C3Di_GetContext();
+    u32 dirty=context->flags&C3DiF_TexAll;
+    if(!path || !gpuCmdBuf) {
+        n3ds_gpu_texture_rebind_reset();
+    } else if(dirty) {
+        u32 units=0, matching=0;
+        int same_list=texture_rebinds.list==gpuCmdBuf && gpuCmdBufOffset>=texture_rebinds.end;
+        int allowed=same_list && !(context->flags&(C3DiF_FrameBuf|C3DiF_TexStatus)) &&
+            !(context->texConfig&BIT(16));
+        for(unsigned int unit=0;unit<3;++unit) {
+            C3D_Tex *sampler=context->tex[unit];
+            if(!sampler) continue;
+            unsigned int id;
+            if(!n3ds_gpu_texture_rebind_identity(unit,sampler,&id)) {
+                /* Keep the global clear when another active unit might
+                 * sample mutable storage or an unsupported descriptor. */
+                n3ds_gpu_texture_rebind_reset();
+                __real_C3Di_UpdateContext();
+                return;
+            }
+            units|=BIT(unit);
+            if(allowed && (dirty&C3DiF_Tex(unit)) && (texture_rebinds.units&BIT(unit)) &&
+                texture_rebinds.id[unit]==id && !memcmp(texture_rebinds.sampler+unit,sampler,sizeof(*sampler)))
+                matching|=C3DiF_Tex(unit);
+            texture_rebinds.sampler[unit]=*sampler;
+            texture_rebinds.id[unit]=id;
+        }
+        /* The stock update still owns enables and cache invalidation for
+         * changed descriptors. Only exact pending rebinds can be cleared. */
+        if(units!=(context->texConfig&7u)) matching=0;
+        u32 elided=path==2?matching:0;
+        context->flags&=~elided;
+        n3ds_gpu_probe_texture_rebinds(__builtin_popcount(matching),__builtin_popcount(elided),elided==dirty);
+        texture_rebinds.list=gpuCmdBuf;
+        texture_rebinds.units=units;
+    }
+    __real_C3Di_UpdateContext();
+    texture_rebinds.end=gpuCmdBufOffset;
+}
+#endif
 #ifdef HALO_N3DS_UNUSED_TEXTURE_UNITS
 unsigned int n3ds_gpu_texture_unit_mask(void);
 void n3ds_gpu_texture_unit_observe(unsigned int omitted, int write);
@@ -28,6 +88,12 @@ static void texture_units_update(const C3D_Context *context, bool stock_write)
     }
     n3ds_gpu_texture_unit_observe(stock & ~desired, write);
 }
+#endif
+
+#ifdef HALO_N3DS_PROBE_TEXTURE_REBINDS
+#define update_stock_context texture_rebind_update
+#else
+#define update_stock_context __real_C3Di_UpdateContext
 #endif
 
 #ifdef HALO_N3DS_OPAQUE_COLOR_READS
@@ -65,7 +131,7 @@ static bool overwrites_all_color(const C3D_Context *context)
 static void color_read_update(void)
 {
     if (!color_read_path && !color_read_omitted) {
-        __real_C3Di_UpdateContext();
+        update_stock_context();
         return;
     }
 
@@ -81,7 +147,7 @@ static void color_read_update(void)
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_FLUSH, 1);
         GPUCMD_AddWrite(GPUREG_FRAMEBUFFER_INVALIDATE, 1);
     }
-    __real_C3Di_UpdateContext();
+    update_stock_context();
 
     /* A dirty bind installs the stock permissions. In that case the new
      * access mask can follow in the same setup, before any primitive. */
@@ -114,7 +180,7 @@ void __wrap_C3Di_UpdateContext(void)
 #ifdef HALO_N3DS_OPAQUE_COLOR_READS
     color_read_update();
 #else
-    __real_C3Di_UpdateContext();
+    update_stock_context();
 #endif
 #ifdef HALO_N3DS_UNUSED_TEXTURE_UNITS
     texture_units_update(context, stock_texture_write);

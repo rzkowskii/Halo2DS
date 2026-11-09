@@ -11,6 +11,8 @@ void n3ds_files_thread_exit(void);
 int n3ds_files_path_in_use(const char *path);
 int n3ds_file_resolve(const char *xbox_path, char *native_path, unsigned int capacity, int write);
 unsigned int n3ds_file_open(const char *path, unsigned int permissions);
+/* Optional stdio buffer. Keep it alive until the handle is closed. */
+unsigned int n3ds_file_open_with_buffer(const char *path, unsigned int permissions, void *buffer, unsigned int size);
 int n3ds_file_valid(unsigned int handle);
 int n3ds_file_close(unsigned int handle);
 int n3ds_file_read(unsigned int handle, void *buffer, unsigned int size);

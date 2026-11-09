@@ -48,6 +48,8 @@ static int sensor_size=SENSOR;
 static struct {C3D_Tex *texture;C3D_RenderTarget *target;int failed;} sensor_gpu[3];
 static int sensor_native;
 static unsigned int sensor_native_frames,sensor_native_blips,sensor_cpu_frames;
+static unsigned int sensor_native_blip_batches;
+static C3D_Tex *sensor_blip_texture;
 static void sensor_gpu_dispose(void);
 static int sensor_native_tests(void);
 
@@ -670,48 +672,83 @@ static int sensor_gpu_begin(void)
         sensor_gpu[slot].texture=t;sensor_gpu[slot].target=target;
 
     }
-    /* FrameEnd(GX_CMDLIST_FLUSH) flushes only its final command segment.
-     * This earlier world/HUD segment needs its own flush request or hardware
-     * can execute stale commands when the motion tracker becomes visible.
-     * Queue order and deferred vertex/index flushes at present are unchanged;
-     * FrameSplit enqueues work, and FrameEnd starts the queue. */
+    C3D_RenderTarget *target=sensor_gpu[slot].target;
     n3ds_gpu_framebuffer_invalidate();
-    C3D_FrameSplit(GX_CMDLIST_FLUSH);
-    C3D_RenderTargetClear(sensor_gpu[slot].target,C3D_CLEAR_COLOR,0,0);
-    C3D_FrameDrawOn(sensor_gpu[slot].target);
+#ifdef HALO_N3DS_PROBE_RADAR_INLINE_CLEAR
+    int inline_clear=n3ds_gpu_probe_radar_inline_clear() && n3ds_gpu_command_usage()<.95f;
+    if(!inline_clear)
+#endif
+    {
+        /* The GX fill must follow an explicit flush of the preceding list.
+         * FrameEnd's flush flag applies only to its final list. */
+        C3D_FrameSplit(GX_CMDLIST_FLUSH);
+        C3D_RenderTargetClear(target,C3D_CLEAR_COLOR,0,0);
+    }
+    C3D_FrameDrawOn(target);
     if(!n3ds_gpu_text_offscreen_begin(sensor_size,sensor_size)) {n3ds_gpu_hud_screen_restore();return 0;}
+#ifdef HALO_N3DS_PROBE_RADAR_INLINE_CLEAR
+    if(inline_clear) n3ds_gpu_text_offscreen_clear(sensor_size);
+    n3ds_gpu_probe_radar_clear(inline_clear);
+#endif
     C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ONE,GPU_ZERO,GPU_ONE);
     return 1;
 }
-static int sensor_gpu_quad(C3D_Tex *texture,float x0,float y0,float x1,float y1,
-    float u0,float v0,float u1,float v1,const float color[3],unsigned int border)
+static void sensor_quad_vertices(struct native_text_vertex v[4],float x0,float y0,float x1,float y1,
+    float u0,float v0,float u1,float v1,const float color[3])
 {
     const int corners[4][2]={{0,0},{1,0},{1,1},{0,1}};
-    struct native_text_vertex v[4];
     for(int i=0;i<4;++i) {
         int x=corners[i][0],y=corners[i][1];
         v[i].position[0]=x?x1:x0;v[i].position[1]=y?y1:y0;
         v[i].uv[0]=x?u1:u0;v[i].uv[1]=y?v1:v0;
         for(int c=0;c<3;++c) v[i].color[c]=color[c];v[i].color[3]=1;
     }
+}
+static int sensor_gpu_quad(C3D_Tex *texture,float x0,float y0,float x1,float y1,
+    float u0,float v0,float u1,float v1,const float color[3],unsigned int border)
+{
+    struct native_text_vertex v[4];
+    sensor_quad_vertices(v,x0,y0,x1,y1,u0,v0,u1,v1,color);
     unsigned int saved=texture->border;texture->border=border;
     int result=n3ds_gpu_texture_bind(0,texture) && n3ds_gpu_text_offscreen_draw(v);
     texture->border=saved;n3ds_gpu_texture_bind(0,texture);
     return result;
 }
+static int sensor_gpu_finish_blips(void)
+{
+    C3D_Tex *texture=sensor_blip_texture;
+    if(!texture) return 1;
+    sensor_blip_texture=NULL;
+    int ok=n3ds_gpu_text_offscreen_batch_end(texture,0);
+    sensor_native_blip_batches+=ok;
+    return ok;
+}
 static int sensor_gpu_blip(C3D_Tex *texture,float px,float py,float size,const float color[3])
 {
+    /* Preserve contact order and flush the run before changing its texture
+     * or installing the sweep/mask blend. Only adjacent contacts can batch. */
+    if(texture!=sensor_blip_texture) {
+        if(!sensor_gpu_finish_blips()) return 0;
+        n3ds_gpu_text_offscreen_batch_begin();
+        sensor_blip_texture=texture;
+    }
     float cx=px*-.03125f,cy=py*-.03125f,r=size*.0625f;
+    struct native_text_vertex v[4];
+    sensor_quad_vertices(v,(cx-r+1)*.5f*sensor_size,(1-cy-r)*.5f*sensor_size,
+        (cx+r+1)*.5f*sensor_size,(1-cy+r)*.5f*sensor_size,0,0,1,1,color);
+    if(!n3ds_gpu_text_offscreen_draw(v)) {
+        sensor_gpu_finish_blips();
+        return 0;
+    }
     ++sensor_native_blips;
-    return sensor_gpu_quad(texture,(cx-r+1)*.5f*sensor_size,(1-cy-r)*.5f*sensor_size,
-        (cx+r+1)*.5f*sensor_size,(1-cy+r)*.5f*sensor_size,0,0,1,1,color,0);
+    return 1;
 }
 static C3D_Tex *sensor_gpu_end(C3D_Tex *sweep,C3D_Tex *mask,float scale)
 {
     const float tint[3]={.4588f,.7294f,1},white[3]={1,1,1};
     float x0=-.0078125f*sensor_size,y0=-.0234375f*sensor_size;
     float x1=1.0234375f*sensor_size,y1=1.0078125f*sensor_size;
-    if(!n3ds_gpu_text_offscreen_begin(sensor_size,sensor_size)) return NULL;
+    if(!sensor_gpu_finish_blips() || !n3ds_gpu_text_offscreen_begin(sensor_size,sensor_size)) return NULL;
     C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_SRC_ALPHA,GPU_ZERO,GPU_ONE);
     if(!sensor_gpu_quad(sweep,x0,y0,x1,y1,.5f+.5f*scale,.5f-.5f*scale,.5f-.5f*scale,.5f+.5f*scale,tint,0x46000000)) return NULL;
     C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ZERO,GPU_SRC_ALPHA,GPU_ZERO,GPU_ONE);
@@ -723,13 +760,15 @@ static C3D_Tex *sensor_gpu_end(C3D_Tex *sweep,C3D_Tex *mask,float scale)
 static void sensor_gpu_dispose(void)
 {
     extern void n3ds_log(const char *);char message[160];
-    snprintf(message,sizeof(message),"NATIVE RADAR: frames=%u contacts=%u cpu_fallback_frames=%u",sensor_native_frames,sensor_native_blips,sensor_cpu_frames);n3ds_log(message);
+    snprintf(message,sizeof(message),"NATIVE RADAR: frames=%u contacts=%u cpu_fallback_frames=%u contact_draws=%u",
+        sensor_native_frames,sensor_native_blips,sensor_cpu_frames,sensor_native_blip_batches);n3ds_log(message);
     for(int i=0;i<3;++i) {
         if(sensor_gpu[i].target) C3D_RenderTargetDelete(sensor_gpu[i].target);
         n3ds_gpu_texture_destroy(sensor_gpu[i].texture);
     }
     memset(sensor_gpu,0,sizeof(sensor_gpu));sensor_native=0;
     sensor_native_frames=sensor_native_blips=sensor_cpu_frames=0;
+    sensor_native_blip_batches=0;
 }
 void n3ds_gpu_sensor_begin(void)
 {
@@ -831,7 +870,10 @@ int n3ds_gpu_sensor_blip(void *texture,float px,float py,float size,const float 
 int n3ds_gpu_sensor_end(void *sweep,void *mask,float scale,float cx,float cy,float radius,float width,float height)
 {
     HUD_PROFILE_BEGIN();
-    if(!sweep || !mask || !isfinite(scale)) return 0;
+    if(!sweep || !mask || !isfinite(scale)) {
+        if(sensor_native) sensor_gpu_finish_blips();
+        return 0;
+    }
     C3D_Tex *t;
     if(sensor_native) {t=sensor_gpu_end(sweep,mask,scale);if(!t) return 0;}
     else {

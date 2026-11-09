@@ -1,6 +1,11 @@
 /* Owner-side paused-view diagnostic. Only copied camera values and counters
  * cross frames. The Citro3D adapter supplies scalar completion timings. */
-enum { GPU_PROBE_WARMUP = 3, GPU_PROBE_SAMPLES = 12, GPU_PROBE_RUNS = 3, GPU_PROBE_MISSING_LIMIT = 5 };
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+enum { GPU_PROBE_WARMUP = 2, GPU_PROBE_SAMPLES = 6, GPU_PROBE_RUNS = 1, GPU_PROBE_SECONDS = 75 };
+#else
+enum { GPU_PROBE_WARMUP = 3, GPU_PROBE_SAMPLES = 12, GPU_PROBE_RUNS = 3, GPU_PROBE_SECONDS = 30 };
+#endif
+enum { GPU_PROBE_MISSING_LIMIT = 5 };
 enum { PROBE_DRAWS, PROBE_ELEMENTS, PROBE_TERRAIN_DRAWS, PROBE_TERRAIN_ELEMENTS,
 #ifdef HALO_N3DS_FRAMEBUFFER_REUSE
     PROBE_FB_BINDS, PROBE_FB_REUSES,
@@ -11,8 +16,90 @@ enum { PROBE_DRAWS, PROBE_ELEMENTS, PROBE_TERRAIN_DRAWS, PROBE_TERRAIN_ELEMENTS,
 #ifdef HALO_N3DS_UNUSED_TEXTURE_UNITS
     PROBE_TEXTURE_DRAWS, PROBE_TEXTURE_UNITS, PROBE_TEXTURE_WRITES,
 #endif
+#ifdef HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO
+    PROBE_ALPHA_EFFECT_DRAWS, PROBE_ALPHA_TEST_DRAWS,
+#endif
+#ifdef HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT
+    PROBE_MODEL_TINT_DRAWS, PROBE_MODEL_TINT_BYPASSED,
+#endif
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+    PROBE_LATE_SKY_APPLIED,
+#endif
+#ifdef HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA
+    PROBE_TERRAIN_ALPHA_ELIGIBLE, PROBE_TERRAIN_ALPHA_BYPASSED,
+#endif
+#ifdef HALO_N3DS_PROBE_TEXTURE_REBINDS
+    PROBE_REBIND_ELIGIBLE, PROBE_REBIND_ELIDED, PROBE_REBIND_CLEARS,
+#endif
+#ifdef HALO_N3DS_PROBE_RADAR_INLINE_CLEAR
+    PROBE_RADAR_FILL, PROBE_RADAR_INLINE,
+#endif
     PROBE_COUNTERS };
-#ifdef HALO_N3DS_TEXTURE_VRAM_MIRRORS
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+enum {
+    PROBE_REUSE_MODE = NATIVE_GPU_PIXEL_CORONAS + 1,
+    PROBE_OPAQUE_COLOR_MODE,
+    PROBE_TEXTURE_UNITS_MODE,
+    PROBE_EFFECT_ALPHA_MODE,
+    PROBE_NEUTRAL_MODEL_TINT_MODE,
+    PROBE_REBIND_MODE,
+    PROBE_RADAR_CLEAR_MODE
+};
+static const unsigned char probe_modes[] = {
+    0, 1, 0, 2, 0,
+    NATIVE_GPU_PIXEL_SCENE, 0, NATIVE_GPU_PIXEL_SKY, 0, NATIVE_GPU_PIXEL_TERRAIN, 0,
+    NATIVE_GPU_PIXEL_MODELS, 0, NATIVE_GPU_PIXEL_EFFECTS, 0, NATIVE_GPU_PIXEL_CORONAS, 0,
+    NATIVE_GPU_PIXEL_TOP_OVERLAY, 0, NATIVE_GPU_PIXEL_BOTTOM, 0,
+    PROBE_REUSE_MODE, 0, PROBE_OPAQUE_COLOR_MODE, 0, PROBE_TEXTURE_UNITS_MODE, 0,
+    PROBE_EFFECT_ALPHA_MODE, 0, PROBE_NEUTRAL_MODEL_TINT_MODE, 0,
+    PROBE_REBIND_MODE, 0, PROBE_RADAR_CLEAR_MODE, 0
+};
+static const char *const probe_mode_names[] = {
+    "reference", "quarter-pixels", "no-effects", "scene-1px", "effects-1px",
+    "top-overlay-1px", "bottom-1px", "sky-1px", "terrain-1px", "models-1px", "coronas-1px",
+    "framebuffer-reuse", "opaque-color-reads", "unused-texture-units", "effect-alpha-zero",
+    "neutral-model-tint", "texture-rebinds", "radar-inline-clear"
+};
+#elif defined(HALO_N3DS_PROBE_LATE_SKY)
+enum { PROBE_LATE_SKY_MODE = 3 };
+static const unsigned char probe_modes[] = {0, PROBE_LATE_SKY_MODE, 0, PROBE_LATE_SKY_MODE, 0};
+static const char *const probe_mode_names[] = {"reference", "quarter-pixels", "no-effects", "late-sky"};
+#elif defined(HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA)
+enum { PROBE_OPAQUE_TERRAIN_ALPHA_MODE = 3 };
+static const unsigned char probe_modes[] = {0, PROBE_OPAQUE_TERRAIN_ALPHA_MODE, 0, PROBE_OPAQUE_TERRAIN_ALPHA_MODE, 0};
+static const char *const probe_mode_names[] = {"reference", "quarter-pixels", "no-effects", "opaque-terrain-alpha"};
+#elif defined(HALO_N3DS_PROBE_PIXEL_PASSES)
+static const unsigned char probe_modes[] = {
+#ifdef HALO_N3DS_PROBE_WORLD_PIXEL_PASSES
+    0, NATIVE_GPU_PIXEL_SKY, 0, NATIVE_GPU_PIXEL_TERRAIN, 0,
+    NATIVE_GPU_PIXEL_MODELS, 0, NATIVE_GPU_PIXEL_EFFECTS, 0, NATIVE_GPU_PIXEL_CORONAS, 0
+#else
+    0, NATIVE_GPU_PIXEL_SCENE, 0, NATIVE_GPU_PIXEL_EFFECTS, 0,
+    NATIVE_GPU_PIXEL_TOP_OVERLAY, 0, NATIVE_GPU_PIXEL_BOTTOM, 0
+#endif
+};
+static const char *const probe_mode_names[] = {
+    "reference", "quarter-pixels", "no-effects", "scene-1px",
+    "effects-1px", "top-overlay-1px", "bottom-1px", "sky-1px",
+    "terrain-1px", "models-1px", "coronas-1px"
+};
+#elif defined(HALO_N3DS_PROBE_RADAR_INLINE_CLEAR)
+enum { PROBE_RADAR_CLEAR_MODE = 3 };
+static const unsigned char probe_modes[] = {0, PROBE_RADAR_CLEAR_MODE, 0, PROBE_RADAR_CLEAR_MODE, 0};
+static const char *const probe_mode_names[] = { "reference", "quarter-pixels", "no-effects", "radar-inline-clear" };
+#elif defined(HALO_N3DS_PROBE_TEXTURE_REBINDS)
+enum { PROBE_REBIND_MODE = 3 };
+static const unsigned char probe_modes[] = {0, PROBE_REBIND_MODE, 0, PROBE_REBIND_MODE, 0};
+static const char *const probe_mode_names[] = {"reference", "quarter-pixels", "no-effects", "texture-rebinds"};
+#elif defined(HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO)
+enum { PROBE_EFFECT_ALPHA_MODE = 3 };
+static const unsigned char probe_modes[] = {0, PROBE_EFFECT_ALPHA_MODE, 0, PROBE_EFFECT_ALPHA_MODE, 0};
+static const char *const probe_mode_names[] = {"reference", "quarter-pixels", "no-effects", "effect-alpha-zero"};
+#elif defined(HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT)
+enum { PROBE_NEUTRAL_MODEL_TINT_MODE = 3 };
+static const unsigned char probe_modes[] = {0, PROBE_NEUTRAL_MODEL_TINT_MODE, 0, PROBE_NEUTRAL_MODEL_TINT_MODE, 0};
+static const char *const probe_mode_names[] = {"reference", "quarter-pixels", "no-effects", "neutral-model-tint"};
+#elif defined(HALO_N3DS_TEXTURE_VRAM_MIRRORS)
 enum { PROBE_VRAM_MODE = 3 };
 static const unsigned char probe_modes[] = {0, PROBE_VRAM_MODE, 0, PROBE_VRAM_MODE, 0};
 static const char *const probe_mode_names[] = {"reference", "quarter-pixels", "no-effects", "texture-vram-mirrors"};
@@ -35,20 +122,85 @@ static const char *const probe_mode_names[] = {"normal", "quarter-pixels", "no-e
 static struct {
     struct native_gpu_probe_view view;
     u64 started;
-    u32 run, phase, warmup, samples, missing, pending_submission;
+    u32 run, phase, warmup, samples, draw_samples, missing, pending_submission;
     u32 queue_ticks[GPU_PROBE_SAMPLES];
-    u64 wait_ticks;
+    u64 wait_ticks, draw_ticks, tail_ticks;
     unsigned int draws[PROBE_COUNTERS], minimum[PROBE_COUNTERS], maximum[PROBE_COUNTERS];
 #ifdef HALO_N3DS_TEXTURE_VRAM_MIRRORS
     unsigned int mirror_resident, mirror_bytes, mirror_uploads, mirror_failures;
 #endif
     int chord_held, active, selected, recording, terrain;
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    int status;
+#endif
+#ifdef HALO_N3DS_PROBE_PIXEL_PASSES
+    enum native_gpu_pixel_pass pixel_pass;
+#endif
 } gpu_probe;
+
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+int n3ds_gpu_startup_diagnostics_status(void)
+{
+    return gpu_probe.status;
+}
+#endif
+
+#ifdef HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT
+static int gpu_probe_neutral_model_tint(void)
+{
+    return gpu_probe.recording && probe_modes[gpu_probe.phase] == PROBE_NEUTRAL_MODEL_TINT_MODE;
+}
+#endif
+
+#ifdef HALO_N3DS_PROBE_RADAR_INLINE_CLEAR
+int n3ds_gpu_probe_radar_inline_clear(void)
+{
+    return gpu_probe.recording && probe_modes[gpu_probe.phase] == PROBE_RADAR_CLEAR_MODE;
+}
+
+void n3ds_gpu_probe_radar_clear(int inline_clear)
+{
+    if(gpu_probe.recording) ++gpu_probe.draws[inline_clear ? PROBE_RADAR_INLINE : PROBE_RADAR_FILL];
+}
+#endif
+
+#ifdef HALO_N3DS_PROBE_TEXTURE_REBINDS
+int n3ds_gpu_probe_texture_rebind_path(void)
+{
+    if(!gpu_probe.recording) return 0;
+    return probe_modes[gpu_probe.phase]==PROBE_REBIND_MODE ? 2 : 1;
+}
+
+void n3ds_gpu_probe_texture_rebinds(unsigned int eligible,unsigned int elided,int clear)
+{
+    gpu_probe.draws[PROBE_REBIND_ELIGIBLE]+=eligible;
+    gpu_probe.draws[PROBE_REBIND_ELIDED]+=elided;
+    gpu_probe.draws[PROBE_REBIND_CLEARS]+=clear;
+}
+#endif
+#ifdef HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO
+int n3ds_gpu_probe_effect_alpha_zero(void)
+{
+    return gpu_probe.recording && probe_modes[gpu_probe.phase] == PROBE_EFFECT_ALPHA_MODE;
+}
+
+void n3ds_gpu_probe_alpha_effect_draw(int alpha_test)
+{
+    if (gpu_probe.recording) {
+        ++gpu_probe.draws[PROBE_ALPHA_EFFECT_DRAWS];
+        gpu_probe.draws[PROBE_ALPHA_TEST_DRAWS] += alpha_test;
+    }
+}
+#endif
 
 #ifdef HALO_N3DS_FRAMEBUFFER_REUSE
 static int gpu_probe_framebuffer_reuse(void)
 {
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    return gpu_probe.recording && probe_modes[gpu_probe.phase] == PROBE_REUSE_MODE;
+#else
     return !gpu_probe.recording || probe_modes[gpu_probe.phase] == PROBE_REUSE_MODE;
+#endif
 }
 
 static void gpu_probe_framebuffer_bind(int reused)
@@ -59,7 +211,7 @@ static void gpu_probe_framebuffer_bind(int reused)
 #endif
 
 u32 n3ds_c3d_gpu_probe_submission(void);
-int n3ds_c3d_gpu_probe_sample(u32 submission, u32 *ticks);
+int n3ds_c3d_gpu_probe_sample(u32 submission, u32 *ticks, u32 *draw_ticks);
 
 static void gpu_probe_abort(const char *reason)
 {
@@ -68,15 +220,21 @@ static void gpu_probe_abort(const char *reason)
         snprintf(message, sizeof(message), "GPU PROBE ABORT: run=%u phase=%u samples=%u reason=%s",
             gpu_probe.run, gpu_probe.phase + 1, gpu_probe.samples, reason);
         n3ds_log(message);
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+        gpu_probe.status = -1;
+#endif
     }
     gpu_probe.active = gpu_probe.selected = gpu_probe.recording = gpu_probe.terrain = 0;
     gpu_probe.pending_submission = 0;
 }
 
-void n3ds_gpu_probe_view(const struct native_gpu_probe_view *view, int chord_held)
+void n3ds_gpu_probe_view(const struct native_gpu_probe_view *view, int requested)
 {
-    int fresh_chord = chord_held && !gpu_probe.chord_held;
+#ifndef HALO_N3DS_STARTUP_DIAGNOSTICS
+    int chord_held = requested;
+    requested = chord_held && !gpu_probe.chord_held;
     gpu_probe.chord_held = chord_held;
+#endif
     if (gpu_probe.active) {
         if (!view) gpu_probe_abort("pause-left");
         else if (view->tick != gpu_probe.view.tick || view->bsp != gpu_probe.view.bsp ||
@@ -84,14 +242,15 @@ void n3ds_gpu_probe_view(const struct native_gpu_probe_view *view, int chord_hel
             memcmp(view->camera, gpu_probe.view.camera, sizeof(view->camera)) ||
             memcmp(view->bounds, gpu_probe.view.bounds, sizeof(view->bounds)))
             gpu_probe_abort("view-changed");
-        else if (svcGetSystemTick() - gpu_probe.started >= 30ULL * SYSCLOCK_ARM11)
+        else if (svcGetSystemTick() - gpu_probe.started >= (u64)GPU_PROBE_SECONDS * SYSCLOCK_ARM11)
             gpu_probe_abort("time-limit");
-    } else if (view && fresh_chord && !diagnostic_mode && gpu_probe.run < GPU_PROBE_RUNS) {
+    } else if (view && requested && !diagnostic_mode && gpu_probe.run < GPU_PROBE_RUNS) {
         gpu_probe.view = *view;
         gpu_probe.started = svcGetSystemTick();
         ++gpu_probe.run;
         gpu_probe.phase = gpu_probe.warmup = gpu_probe.samples = gpu_probe.missing = 0;
-        gpu_probe.wait_ticks = 0;
+        gpu_probe.draw_samples = 0;
+        gpu_probe.wait_ticks = gpu_probe.draw_ticks = gpu_probe.tail_ticks = 0;
         gpu_probe.active = 1;
 #ifdef HALO_N3DS_TEXTURE_VRAM_MIRRORS
         n3ds_gpu_texture_mirror_stats(&gpu_probe.mirror_resident,&gpu_probe.mirror_bytes,
@@ -107,6 +266,12 @@ void n3ds_gpu_probe_view(const struct native_gpu_probe_view *view, int chord_hel
             gpu_probe.run, view->tick, view->generation, view->bsp,
             view->camera[0][0], view->camera[0][1], view->camera[0][2]);
         n3ds_log(message);
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+        snprintf(message, sizeof(message),
+            "GPU PROBE CONFIG: trigger=startup phases=%u warmup=%u measured=%u deadline_seconds=%u; paused renderer comparisons",
+            (unsigned int)sizeof(probe_modes), GPU_PROBE_WARMUP, GPU_PROBE_SAMPLES, GPU_PROBE_SECONDS);
+        n3ds_log(message);
+#endif
     }
     gpu_probe.selected = gpu_probe.active;
 }
@@ -147,11 +312,31 @@ static void gpu_probe_report_phase(void)
         gpu_probe.queue_ticks[GPU_PROBE_SAMPLES - 1] * tick_to_ms,
         gpu_probe.wait_ticks * tick_to_ms / GPU_PROBE_SAMPLES);
     n3ds_log(message);
+    if (gpu_probe.draw_samples) {
+        double ms_per_sample = tick_to_ms / gpu_probe.draw_samples;
+        snprintf(message, sizeof(message),
+            "GPU PROBE QUEUE SPLIT: run=%u phase=%u samples=%u last_p3d_mean_ms=%.3f after_p3d_mean_ms=%.3f",
+            gpu_probe.run, gpu_probe.phase + 1, gpu_probe.draw_samples,
+            gpu_probe.draw_ticks * ms_per_sample, gpu_probe.tail_ticks * ms_per_sample);
+    } else {
+        snprintf(message, sizeof(message), "GPU PROBE QUEUE SPLIT: run=%u phase=%u samples=0",
+            gpu_probe.run, gpu_probe.phase + 1);
+    }
+    n3ds_log(message);
 #ifdef HALO_N3DS_TEXTURE_VRAM_MIRRORS
     snprintf(message, sizeof(message),
         "GPU PROBE VRAM: run=%u phase=%u resident_images=%u duplicate_bytes=%u warmup_uploads=%u preparation_failures=%u residency=frozen",
         gpu_probe.run, gpu_probe.phase + 1, gpu_probe.mirror_resident,
         gpu_probe.mirror_bytes, gpu_probe.mirror_uploads, gpu_probe.mirror_failures);
+    n3ds_log(message);
+#endif
+#ifdef HALO_N3DS_PROBE_TEXTURE_REBINDS
+    snprintf(message,sizeof(message),
+        "GPU PROBE TEXTURE REBINDS: run=%u phase=%u eligible=%u..%u elided=%u..%u clears_skipped=%u..%u",
+        gpu_probe.run,gpu_probe.phase+1,
+        gpu_probe.minimum[PROBE_REBIND_ELIGIBLE],gpu_probe.maximum[PROBE_REBIND_ELIGIBLE],
+        gpu_probe.minimum[PROBE_REBIND_ELIDED],gpu_probe.maximum[PROBE_REBIND_ELIDED],
+        gpu_probe.minimum[PROBE_REBIND_CLEARS],gpu_probe.maximum[PROBE_REBIND_CLEARS]);
     n3ds_log(message);
 #endif
 #ifdef HALO_N3DS_UNUSED_TEXTURE_UNITS
@@ -179,6 +364,43 @@ static void gpu_probe_report_phase(void)
         gpu_probe.minimum[PROBE_READ_ELIDED], gpu_probe.maximum[PROBE_READ_ELIDED],
         gpu_probe.minimum[PROBE_READ_MASK_WRITES], gpu_probe.maximum[PROBE_READ_MASK_WRITES],
         gpu_probe.minimum[PROBE_READ_EXTRA_FLUSHES], gpu_probe.maximum[PROBE_READ_EXTRA_FLUSHES]);
+    n3ds_log(message);
+#endif
+#ifdef HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO
+    snprintf(message, sizeof(message),
+        "GPU PROBE EFFECT ALPHA: run=%u phase=%u alpha_draws=%u..%u alpha_test_draws=%u..%u",
+        gpu_probe.run, gpu_probe.phase + 1,
+        gpu_probe.minimum[PROBE_ALPHA_EFFECT_DRAWS], gpu_probe.maximum[PROBE_ALPHA_EFFECT_DRAWS],
+        gpu_probe.minimum[PROBE_ALPHA_TEST_DRAWS], gpu_probe.maximum[PROBE_ALPHA_TEST_DRAWS]);
+    n3ds_log(message);
+#endif
+#ifdef HALO_N3DS_PROBE_RADAR_INLINE_CLEAR
+    snprintf(message, sizeof(message),
+        "GPU PROBE RADAR CLEAR: run=%u phase=%u gx_fills=%u..%u inline_clears=%u..%u",
+        gpu_probe.run, gpu_probe.phase+1,
+        gpu_probe.minimum[PROBE_RADAR_FILL], gpu_probe.maximum[PROBE_RADAR_FILL],
+        gpu_probe.minimum[PROBE_RADAR_INLINE], gpu_probe.maximum[PROBE_RADAR_INLINE]);
+    n3ds_log(message);
+#endif
+#ifdef HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT
+    snprintf(message, sizeof(message),
+        "GPU PROBE MODEL TINT: run=%u phase=%u white_parts=%u..%u bypassed_parts=%u..%u",
+        gpu_probe.run, gpu_probe.phase+1,
+        gpu_probe.minimum[PROBE_MODEL_TINT_DRAWS],gpu_probe.maximum[PROBE_MODEL_TINT_DRAWS],
+        gpu_probe.minimum[PROBE_MODEL_TINT_BYPASSED],gpu_probe.maximum[PROBE_MODEL_TINT_BYPASSED]);
+    n3ds_log(message);
+#endif
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+    snprintf(message, sizeof(message), "GPU PROBE LATE SKY: run=%u phase=%u applied=%u..%u",
+        gpu_probe.run, gpu_probe.phase+1, gpu_probe.minimum[PROBE_LATE_SKY_APPLIED],
+        gpu_probe.maximum[PROBE_LATE_SKY_APPLIED]);
+    n3ds_log(message);
+#endif
+#ifdef HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA
+    snprintf(message, sizeof(message), "GPU PROBE TERRAIN ALPHA: run=%u phase=%u eligible=%u..%u bypassed=%u..%u",
+        gpu_probe.run, gpu_probe.phase+1,
+        gpu_probe.minimum[PROBE_TERRAIN_ALPHA_ELIGIBLE],gpu_probe.maximum[PROBE_TERRAIN_ALPHA_ELIGIBLE],
+        gpu_probe.minimum[PROBE_TERRAIN_ALPHA_BYPASSED],gpu_probe.maximum[PROBE_TERRAIN_ALPHA_BYPASSED]);
     n3ds_log(message);
 #endif
     snprintf(message, sizeof(message),
@@ -209,8 +431,8 @@ static void gpu_probe_begin(int midpoint, u64 waited)
     }
 #endif
     if (gpu_probe.pending_submission) {
-        u32 ticks;
-        int ready = n3ds_c3d_gpu_probe_sample(gpu_probe.pending_submission, &ticks);
+        u32 ticks, draw_ticks;
+        int ready = n3ds_c3d_gpu_probe_sample(gpu_probe.pending_submission, &ticks, &draw_ticks);
         gpu_probe.pending_submission = 0;
         if (!ready) {
             if (++gpu_probe.missing > GPU_PROBE_MISSING_LIMIT) {
@@ -226,6 +448,11 @@ static void gpu_probe_begin(int midpoint, u64 waited)
                 if (!gpu_probe.samples || value > gpu_probe.maximum[i]) gpu_probe.maximum[i] = value;
             }
             gpu_probe.wait_ticks += waited;
+            if (draw_ticks) {
+                ++gpu_probe.draw_samples;
+                gpu_probe.draw_ticks += draw_ticks;
+                gpu_probe.tail_ticks += ticks - draw_ticks;
+            }
             gpu_probe.queue_ticks[gpu_probe.samples++] = ticks;
             if (gpu_probe.samples == GPU_PROBE_SAMPLES) {
                 gpu_probe_report_phase();
@@ -233,7 +460,25 @@ static void gpu_probe_begin(int midpoint, u64 waited)
                     char message[112];
                     snprintf(message, sizeof(message),
                         "GPU PROBE COMPLETE: run=%u missing=%u rendering=%s", gpu_probe.run, gpu_probe.missing,
-#ifdef HALO_N3DS_TEXTURE_VRAM_MIRRORS
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+                        "startup-suite"
+#elif defined(HALO_N3DS_PROBE_WORLD_PIXEL_PASSES)
+                        "world-pixel-passes"
+#elif defined(HALO_N3DS_PROBE_LATE_SKY)
+                        "late-sky"
+#elif defined(HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA)
+                        "opaque-terrain-alpha"
+#elif defined(HALO_N3DS_PROBE_PIXEL_PASSES)
+                        "pixel-passes"
+#elif defined(HALO_N3DS_PROBE_RADAR_INLINE_CLEAR)
+                        "radar-inline-clear"
+#elif defined(HALO_N3DS_PROBE_TEXTURE_REBINDS)
+                        "texture-rebinds"
+#elif defined(HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO)
+                        "effect-alpha-zero"
+#elif defined(HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT)
+                        "neutral-model-tint"
+#elif defined(HALO_N3DS_TEXTURE_VRAM_MIRRORS)
                         "texture-vram-mirrors"
 #elif defined(HALO_N3DS_UNUSED_TEXTURE_UNITS)
                         "unused-texture-units"
@@ -247,14 +492,20 @@ static void gpu_probe_begin(int midpoint, u64 waited)
                     );
                     n3ds_log(message);
                     gpu_probe.active = 0;
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+                    gpu_probe.status = 1;
+#endif
                     return;
                 }
-                gpu_probe.warmup = gpu_probe.samples = 0;
-                gpu_probe.wait_ticks = 0;
+                gpu_probe.warmup = gpu_probe.samples = gpu_probe.draw_samples = 0;
+                gpu_probe.wait_ticks = gpu_probe.draw_ticks = gpu_probe.tail_ticks = 0;
             }
         }
     }
     memset(gpu_probe.draws, 0, sizeof(gpu_probe.draws));
+#ifdef HALO_N3DS_PROBE_PIXEL_PASSES
+    gpu_probe.pixel_pass = NATIVE_GPU_PIXEL_SCENE;
+#endif
     gpu_probe.recording = 1;
 }
 

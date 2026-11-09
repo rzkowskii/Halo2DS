@@ -8,10 +8,11 @@
 #include <unistd.h>
 #include "engine_files.h"
 #include "engine_saves.h"
+#include "engine_state_path.h"
 
 enum { OK=0, NOT_FOUND=2, ACCESS=5, INVALID=87, EXISTS=183, IO_ERROR=1117, BUSY=32,
        ITERATORS=8, MAX_GENERATION=0x01ffffff };
-static const char save_root[]="sdmc:/halo-source/state/saves";
+static const char save_root[]=N3DS_STATE_ROOT "/saves";
 struct save_record { uint32_t magic,version,flags,checksum; unsigned short name[128]; };
 _Static_assert(sizeof(struct save_record)==272,"Persistent save metadata layout");
 struct save_iterator { DIR *directory; unsigned int generation; };

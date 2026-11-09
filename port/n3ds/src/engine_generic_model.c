@@ -371,7 +371,7 @@ void n3ds_generic_model_draw(const struct shader *shader,short permutation,
             }
         }
         for(int a=0;a<2;++a) if(bounds[a+2]-bounds[a]<.0001f) bounds[a+2]=bounds[a]+.0001f;
-        if(!n3ds_gpu_generic_bake_preflight(&bake,bounds,shield?2:0)) return;
+        if(!n3ds_gpu_generic_bake_preflight(&bake,bounds,shield?2:0,0)) return;
         bounds_prepared=1;
     }
 #endif

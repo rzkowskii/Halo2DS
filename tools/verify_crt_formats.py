@@ -15,6 +15,7 @@ def main():
         binary = Path(directory) / 'crt-formats'
         subprocess.run([args.cc, '-std=c11', '-O1', '-g', '-Wall', '-Wextra',
                         '-fsanitize=address,undefined', '-fno-omit-frame-pointer',
+                        '-I', str(root / 'port/n3ds/include'),
                         str(root / 'port/n3ds/tests/host/crt_formats_test.c'),
                         '-o', str(binary)], check=True, timeout=45)
         subprocess.run([str(binary)], check=True, timeout=30)

@@ -15,6 +15,12 @@
 #if HALO_N3DS_DEPENDENCY_TRACE_LOOPS < 1 || HALO_N3DS_DEPENDENCY_TRACE_LOOPS > 18000
 #error "Dependency trace loop limit must be 1..18000"
 #endif
+#ifndef HALO_N3DS_DEPENDENCY_TRACE_START_TICK
+#define HALO_N3DS_DEPENDENCY_TRACE_START_TICK 0
+#endif
+#if HALO_N3DS_DEPENDENCY_TRACE_START_TICK < 0 || HALO_N3DS_DEPENDENCY_TRACE_START_TICK > 2147483647
+#error "Dependency trace start tick must be 0..2147483647"
+#endif
 
 struct n3ds_trace_context {
     uint32_t loop, epoch, generation, attempt, view, submission, job;

@@ -165,8 +165,9 @@ the eligible preparation still after acquisition, not that entire GPU duration.
 Texture maintenance before acquisition may itself fence, so moving work past
 one wait must not merely relocate that wait elsewhere.
 
-Start with the regular mono view immediately following a submitted midpoint.
-Keep one simulation thread. Own camera/frusta, ordered visibility results,
+The opt-in candidate now admits ordinary active mono campaign views,
+including those without a submitted midpoint. Keep one simulation thread.
+Own camera/frusta, ordered visibility results,
 candidate object IDs and generation information in a bounded prepared-view
 record. Use logical identities or explicitly pinned resources, not pointers
 invalidated by map changes or texture maintenance. Capacity/failure/staleness
@@ -185,6 +186,12 @@ The isolated bound is `G + P + E → max(G, P) + E`; savings cannot exceed
 inputs, then rendering. Record moved preparation, residual acquisition wait,
 discarded/stale records, retained bytes and actual completion/presentation
 delivery. Reduced wait alone is not a frame-time win.
+
+For pixel comparisons, establish repeatability for time-dependent effects
+as well as camera and simulation inputs. On the scripted A30 route, a
+1 ms pre-acquisition delay alone changed the live-audio effect counts and
+final color. A private sound-disabled fixture matched color and depth/stencil
+for one captured frame. Use ordinary audio for native timing.
 
 ## 3. Preparation retained by dependency
 
@@ -393,10 +400,11 @@ Stop owned capture/test processes after each bounded sequential batch.
    acknowledgements describe observed dependencies. Use independent display
    observation for distinct images, repeated refresh intervals and stall runs.
 4. Compare each eligible candidate alone against the matching current-source
-   reference, then against the frozen launcher. Start the overlap A/B with
-   `--present-60` on both sides because the first prepared-view case follows
-   a queued midpoint. Keep midpoints off for the first regular-only comparison
-   of skinning, geometry, collision and the UV variant.
+   reference, then against the frozen launcher. The regular-view overlap
+   comparison can run with midpoints off. Repeat with `--present-60` on
+   both sides to measure the interaction with optional frames. Keep
+   midpoints off for the first comparison of skinning, geometry, collision
+   and the UV variant.
 5. Audit motion on the same route. The pose history admits a bounded subset
    of units, items, scenery and devices. Attachments, widgets and many effects
    still need render-only snapshot coverage. Any extension must preserve

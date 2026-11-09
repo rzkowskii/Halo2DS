@@ -162,6 +162,9 @@ void n3ds_frontend_trace(const char *stage)
 #include "engine_checkpoint_test.inl"
 #endif
 #include "engine_frame_pacing.inl"
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+#include "engine_startup_diagnostics.inl"
+#endif
 int halo_engine_boot(void)
 {
 #if HALO_N3DS_TEXTURE_LOD_FIXTURE
@@ -314,8 +317,14 @@ int halo_engine_boot(void)
     CHECK(n3ds_hs_stack_tests());
     n3ds_log("STARTUP: PASS script stack alignment, nested frames, floating-point values and re-entry");
     n3ds_log("STARTUP: main menu ready; entering frame loop");
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+    startup_diagnostics.started=n3ds_engine_ticks();
+#endif
     for(frame=0;(!HALO_N3DS_MISSION_TICKS || frame<HALO_N3DS_MISSION_TICKS) &&
             (!HALO_N3DS_PROFILE_FRAMES || frame<HALO_N3DS_PROFILE_FRAMES) &&
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+            startup_diagnostics_running(frame) &&
+#endif
 #if HALO_N3DS_TEXTURE_COMPARE_FIXTURE
             frame<TEXTURE_COMPARE_LOOPS &&
 #endif
@@ -323,6 +332,14 @@ int halo_engine_boot(void)
             frame<HALO_N3DS_ACTION_REPLAY_FIXTURE_TICKS+180 &&
 #endif
             !n3ds_action_replay_should_exit() && n3ds_engine_app_running();++frame) {
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+        /* Let the original menu finish starting before its map-change service
+         * receives the same request as a campaign selection. */
+        if(frame==STARTUP_DIAGNOSTIC_MENU_WARMUP) {
+            startup_diagnostics_begin();
+            if(startup_diagnostics.status) break;
+        }
+#endif
         struct native_input_sample sample;
         long long start=n3ds_engine_ticks();long local,player,unit=NONE;
 #if HALO_N3DS_TEXTURE_COMPARE_FIXTURE == 2
@@ -396,12 +413,18 @@ int halo_engine_boot(void)
         n3ds_input_gameplay_controls(game_in_progress() && !main_menu_is_active() &&
             !ui_widgets_active() && player_input_enabled() && !cinematic_in_progress());
         if((sample.held&(NATIVE_KEY_START|NATIVE_KEY_SELECT))==(NATIVE_KEY_START|NATIVE_KEY_SELECT)) {
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+            startup_diagnostics_stop("cancelled", "start-select");
+#endif
             n3ds_trace_end_loop();
             break;
         }
         if(n3ds_action_replay_owns_input())memset(&sample,0,sizeof(sample));
 #if HALO_N3DS_TEXTURE_COMPARE_FIXTURE || HALO_N3DS_ACTION_REPLAY_FIXTURE_TICKS
         memset(&sample,0,sizeof(sample));
+#endif
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+        startup_diagnostics_input(&sample);
 #endif
         n3ds_engine_input_sample(&sample);input_update();input_abstraction_update();
 #if FRONTEND_TRACE_FIXTURE
@@ -419,7 +442,14 @@ int halo_engine_boot(void)
                 n3ds_trace_end_loop();
                 break;
             }
-            director_update(1.f/30.f);observer_update(1.f/30.f);
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+            /* The probe compares render passes from the last simulated view.
+             * Keep the observer's wall-time damping out of those samples. */
+            if(!n3ds_startup_diagnostics_gpu_requested())
+#endif
+            {
+                director_update(1.f/30.f);observer_update(1.f/30.f);
+            }
             n3ds_main_mission_save_step(FALSE);
         }
         local=local_player_get_next(NONE);
@@ -617,8 +647,12 @@ int halo_engine_boot(void)
         texture_compare_loops[frame].tick=game_time_get();
         texture_compare_loops[frame].campaign=comparison_campaign;
 #endif
-        frame_pacing_observe(start,pacing_stages,!main_menu_is_active() && !cinematic_in_progress() &&
-            !game_time_get_paused() && !ui_widgets_active());
+        int work_sample=!main_menu_is_active() && !cinematic_in_progress() &&
+            !game_time_get_paused() && !ui_widgets_active();
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+        work_sample=work_sample && startup_diagnostics_work_sample();
+#endif
+        frame_pacing_observe(start,pacing_stages,work_sample);
         n3ds_gpu_frame_work((pacing_stages[4]-start)*(1000.f/n3ds_engine_tick_frequency()));
         n3ds_engine_pace_frame(start);
 #if HALO_N3DS_TEXTURE_COMPARE_FIXTURE == 2
@@ -626,6 +660,9 @@ int halo_engine_boot(void)
 #endif
         n3ds_algorithm_profile_end_loop();
         n3ds_trace_end_loop();
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+        startup_diagnostics_end_loop(unit);
+#endif
     }
 #if HALO_N3DS_TEXTURE_COMPARE_FIXTURE
     CHECK(frame==TEXTURE_COMPARE_LOOPS);

@@ -84,18 +84,53 @@ void rasterizer_models_begin(
 	boolean sky_mode);
 void rasterizer_models_end(
 	void);
+
+static void draw_sky_model(long model_index, real_matrix4x3 *rows, real *scales,
+	const real_point3d *position)
+{
+	struct render_lighting lighting;
+	rasterizer_models_begin(TRUE);
+	csmemset(&lighting, 0, sizeof(lighting));
+	lighting.ambient_color = *global_real_rgb_white;
+	render_model(model_index, 0.f, rows, 0, 0, scales, &lighting, position, 0, 0, 0, 0, TRUE);
+	rasterizer_models_end();
+}
+
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+static struct {
+	boolean pending;
+	long model_index;
+	real_point3d position;
+	real_matrix4x3 rows[MAXIMUM_NODES_PER_ANIMATION];
+	real scales[MAXIMUM_SKIES_PER_SCENARIO];
+} deferred_sky;
+
+boolean n3ds_sky_draw_pending(void)
+{
+	return deferred_sky.pending;
+}
+
+void n3ds_draw_pending_sky(void)
+{
+	if (!deferred_sky.pending) return;
+	deferred_sky.pending = FALSE;
+	draw_sky_model(deferred_sky.model_index, deferred_sky.rows, deferred_sky.scales, &deferred_sky.position);
+}
+#endif
 /* ---------- globals */
 
 real render_sky_globals[MAXIMUM_SKIES_PER_SCENARIO] = {0.f};
 
 /* ---------- public code */
 
-void render_sky(
-	void)
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+void n3ds_render_sky(boolean defer)
+#else
+void render_sky(void)
+#endif
 {
 	real_matrix4x3 node_matrices[MAXIMUM_NODES_PER_ANIMATION];
 	struct real_orientation node_orientations[MAXIMUM_NODES_PER_ANIMATION];
-	struct render_lighting render_model_lighting;
 	real region_scales[MAXIMUM_SKIES_PER_SCENARIO];
 	real_matrix4x3 view_matrix;
 	struct object_marker light_marker;
@@ -103,6 +138,9 @@ void render_sky(
 	struct model *model;
 	struct animation_graph *animation_graph;
 	short i;
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+	deferred_sky.pending = FALSE;
+#endif
 #ifdef HALO_N3DS_PRESENT_INTERPOLATION
 	extern int n3ds_presentation_midpoint_active(void);
 	int midpoint = n3ds_presentation_midpoint_active();
@@ -257,28 +295,29 @@ void render_sky(
 				}
 			}
 
-			rasterizer_models_begin(TRUE);
-			csmemset(&render_model_lighting, 0, sizeof(render_model_lighting));
-			render_model_lighting.ambient_color = *global_real_rgb_white;
-			render_model(
-				sky->model.index,
-				0.f,
-				node_matrices,
-				0,
-				0,
-				region_scales,
-				&render_model_lighting,
-				&render.camera.position,
-				0,
-				0,
-				0,
-				0,
-				TRUE);
-			rasterizer_models_end();
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+			if (defer)
+			{
+				deferred_sky.model_index = sky->model.index;
+				deferred_sky.position = render.camera.position;
+				csmemcpy(deferred_sky.rows, node_matrices, model->nodes.count * sizeof(*node_matrices));
+				csmemcpy(deferred_sky.scales, region_scales, sky->render_model_regions.count * sizeof(*region_scales));
+				deferred_sky.pending = TRUE;
+				return;
+			}
+#endif
+			draw_sky_model(sky->model.index, node_matrices, region_scales, &render.camera.position);
 		}
 	}
 
 	return;
 }
+
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+void render_sky(void)
+{
+	n3ds_render_sky(FALSE);
+}
+#endif
 
 /* ---------- private code */

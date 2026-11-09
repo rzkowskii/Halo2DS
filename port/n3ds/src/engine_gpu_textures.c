@@ -31,12 +31,29 @@ static C3D_Tex bound_sampler[3];
 static C3D_TexCube bound_cube[3];
 static unsigned int bound_identity[3];
 static int bound_valid[3];
+#ifdef HALO_N3DS_PROBE_TEXTURE_REBINDS
+int n3ds_gpu_texture_rebind_identity(unsigned int stage,C3D_Tex *sampler,unsigned int *id)
+{
+    if(!initialized || stage>=3 || !bound_valid[stage] || sampler!=bound_sampler+stage ||
+        C3D_TexGetType(sampler)!=GPU_TEX_2D || (bound[stage] && !bound_identity[stage]))
+        return 0;
+    *id=bound_identity[stage];
+    return 1;
+}
+#endif
 static unsigned int bind_requests,bind_updates;
 /* Generated revisions share lookups and nonrecycling IDs, but never take
  * the 256 map or 16 derivative records. Their 64 records cost 768 ARM32 bytes. */
 enum { IMMUTABLE_BUCKETS=256, IMMUTABLE_SLOTS=256+PLASMA_TEXTURE_SLOTS,
     REVISION_SLOTS=64, IDENTITY_SLOTS=IMMUTABLE_SLOTS+REVISION_SLOTS };
-static struct {void *resource;unsigned int id;unsigned short next;} immutable[IDENTITY_SLOTS];
+static struct {
+    void *resource;
+    unsigned int id;
+    unsigned short next;
+#ifdef HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA
+    unsigned char alpha_state;
+#endif
+} immutable[IDENTITY_SLOTS];
 /* Index+1 chains keep lookups bounded without tombstones after map churn. */
 static unsigned short immutable_bucket[IMMUTABLE_BUCKETS];
 static unsigned int next_identity;
@@ -202,6 +219,41 @@ void *n3ds_gpu_texture_bound(unsigned int stage)
 {
     return stage < 3 ? bound[stage] : NULL;
 }
+#ifdef HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA
+int n3ds_gpu_base_texture_opaque(void)
+{
+    const C3D_Tex *sampler=bound_sampler;
+    C3D_Tex *owner=bound[0];
+    if(!bound_valid[0] || !owner || !bound_identity[0] ||
+       ((sampler->param>>28)&7u)!=GPU_TEX_2D ||
+       (sampler->param&GPU_TEXTURE_WRAP_S(3))==GPU_TEXTURE_WRAP_S(GPU_CLAMP_TO_BORDER) ||
+       (sampler->param&GPU_TEXTURE_WRAP_T(3))==GPU_TEXTURE_WRAP_T(GPU_CLAMP_TO_BORDER))
+        return 0;
+    if(owner->fmt==GPU_RGB8) return 1;
+    if(owner->fmt!=GPU_RGBA8) return 0;
+
+    enum { ALPHA_UNKNOWN, ALPHA_VARIABLE, ALPHA_OPAQUE };
+    for(unsigned int link=immutable_bucket[identity_bucket(owner)];link;link=immutable[link-1].next) {
+        unsigned int slot=link-1;
+        if(immutable[slot].id!=bound_identity[0] || immutable[slot].resource!=owner) continue;
+        if(immutable[slot].alpha_state==ALPHA_UNKNOWN) {
+            immutable[slot].alpha_state=ALPHA_VARIABLE;
+            /* Include every mip so filtering and LOD cannot introduce a
+             * failing sample. Revision invalidation clears this record. */
+            for(unsigned int level=0;level<=owner->maxLevel;++level) {
+                u32 bytes;
+                const u32 *pixels=C3D_Tex2DGetImagePtr(owner,level,&bytes);
+                if(!pixels || !bytes || bytes%sizeof(*pixels)) return 0;
+                for(unsigned int i=0;i<bytes/sizeof(*pixels);++i)
+                    if((pixels[i]&255u)!=255u) return 0;
+            }
+            immutable[slot].alpha_state=ALPHA_OPAQUE;
+        }
+        return immutable[slot].alpha_state==ALPHA_OPAQUE;
+    }
+    return 0;
+}
+#endif
 int n3ds_gpu_texture_sampler_tests(void)
 {
     unsigned int texels[64];for(int i=0;i<64;++i) texels[i]=0x123456ff;

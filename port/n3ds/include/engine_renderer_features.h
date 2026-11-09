@@ -126,6 +126,24 @@ typedef char n3ds_midpoint_capture_tick_valid[(HALO_N3DS_MIDPOINT_CAPTURE_TICK >
 #else
 #define N3DS_RENDERER_ALLOCATION_OBSERVATION 0
 #endif
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+/* The dedicated launcher exercises each GPU variation on a separate phase
+ * after the scripted gameplay sample. Direct builds must use that policy. */
+#if N3DS_RENDERER_VALIDATION_CONFIGURED || N3DS_RENDERER_ALGORITHM_VERIFICATION || \
+    HALO_N3DS_PROFILE_FRAMES || HALO_N3DS_TEXTURE_COMPARE_FIXTURE || HALO_N3DS_TEXTURE_LOD_FIXTURE || \
+    HALO_N3DS_FIXED_WORLD_WIDTH != 400 || HALO_N3DS_TEXTURE_STORAGE != N3DS_TEXTURE_STORAGE_LEGACY || \
+    HALO_N3DS_GEOMETRY_SOURCE != N3DS_GEOMETRY_SOURCE_RUNTIME || HALO_N3DS_VERTEX_LAYOUT != N3DS_VERTEX_LAYOUT_FLOAT || \
+    defined(HALO_N3DS_TEXTURE_VRAM_MIRRORS) || !defined(HALO_N3DS_GPU_PROBE) || \
+    !defined(HALO_N3DS_PRESENT_INTERPOLATION) || !defined(HALO_N3DS_DEPENDENCY_TRACE) || \
+    !defined(HALO_N3DS_PERFORMANCE_PROFILE) || !defined(HALO_N3DS_ALGORITHM_PROFILE) || \
+    !defined(HALO_N3DS_ALLOCATION_PROFILE) || !defined(HALO_N3DS_PROBE_WORLD_PIXEL_PASSES) || \
+    !defined(HALO_N3DS_FRAMEBUFFER_REUSE) || !defined(HALO_N3DS_OPAQUE_COLOR_READS) || \
+    !defined(HALO_N3DS_UNUSED_TEXTURE_UNITS) || !defined(HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO) || \
+    !defined(HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT) || !defined(HALO_N3DS_PROBE_TEXTURE_REBINDS) || \
+    !defined(HALO_N3DS_PROBE_RADAR_INLINE_CLEAR)
+#error "Startup diagnostics require the dedicated native 400x240 diagnostic configuration"
+#endif
+#else
 #if (defined(HALO_N3DS_GPU_PROBE) || defined(HALO_N3DS_FRAMEBUFFER_REUSE) || defined(HALO_N3DS_OPAQUE_COLOR_READS) || \
      defined(HALO_N3DS_UNUSED_TEXTURE_UNITS) || defined(HALO_N3DS_TEXTURE_VRAM_MIRRORS)) && \
     (N3DS_RENDERER_ALGORITHM_VERIFICATION || N3DS_RENDERER_ALLOCATION_OBSERVATION || \
@@ -161,13 +179,37 @@ typedef char n3ds_midpoint_capture_tick_valid[(HALO_N3DS_MIDPOINT_CAPTURE_TICK >
 #endif
 #if defined(HALO_N3DS_GPU_PROBE) && (defined(HALO_N3DS_UNUSED_TEXTURE_UNITS) + \
     defined(HALO_N3DS_OPAQUE_COLOR_READS) + defined(HALO_N3DS_FRAMEBUFFER_REUSE) + \
-    defined(HALO_N3DS_TEXTURE_VRAM_MIRRORS)) > 1
+    defined(HALO_N3DS_TEXTURE_VRAM_MIRRORS) + defined(HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO) + \
+    defined(HALO_N3DS_PROBE_TEXTURE_REBINDS) + defined(HALO_N3DS_PROBE_PIXEL_PASSES) + \
+    defined(HALO_N3DS_PROBE_RADAR_INLINE_CLEAR) + defined(HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT) + \
+    defined(HALO_N3DS_PROBE_LATE_SKY) + defined(HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA)) > 1
 #error "GPU probe compares each candidate independently"
+#endif
+#endif
+#if defined(HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO) && !defined(HALO_N3DS_GPU_PROBE)
+#error "Effect alpha-zero comparison requires the GPU probe"
+#endif
+#if defined(HALO_N3DS_PROBE_WORLD_PIXEL_PASSES) && (!defined(HALO_N3DS_GPU_PROBE) || !defined(HALO_N3DS_PROBE_PIXEL_PASSES))
+#error "World pixel pass comparison requires the pixel pass probe"
+#endif
+#if defined(HALO_N3DS_PROBE_LATE_SKY) && (!defined(HALO_N3DS_GPU_PROBE) || defined(HALO_N3DS_STARTUP_DIAGNOSTICS))
+#error "Late sky requires the independent GPU probe"
+#endif
+#if defined(HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA) && (!defined(HALO_N3DS_GPU_PROBE) || defined(HALO_N3DS_STARTUP_DIAGNOSTICS))
+#error "Opaque terrain alpha requires the independent GPU probe"
+#endif
+#if defined(HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT) && !defined(HALO_N3DS_GPU_PROBE)
+#error "Neutral model tint comparison requires the GPU probe"
+#endif
+#if defined(HALO_N3DS_PROBE_TEXTURE_REBINDS) && !defined(HALO_N3DS_GPU_PROBE)
+#error "Texture rebind comparison requires the GPU probe"
 #endif
 #define N3DS_RENDERER_UNCAPTURED_PROFILE_ELIGIBLE \
     (N3DS_RENDERER_PROFILE_CONFIGURED && !N3DS_RENDERER_VALIDATION_CONFIGURED && \
      !N3DS_RENDERER_ALGORITHM_VERIFICATION && !N3DS_RENDERER_ALLOCATION_OBSERVATION)
-#if N3DS_RENDERER_READBACK_CONFIGURED
+#if defined(HALO_N3DS_STARTUP_DIAGNOSTICS)
+#define N3DS_RENDERER_RUN_PURPOSE "startup-diagnostics"
+#elif N3DS_RENDERER_READBACK_CONFIGURED
 #define N3DS_RENDERER_RUN_PURPOSE "validation-readback"
 #elif N3DS_RENDERER_VALIDATION_CONFIGURED
 #define N3DS_RENDERER_RUN_PURPOSE "validation-fixture"
@@ -175,6 +217,18 @@ typedef char n3ds_midpoint_capture_tick_valid[(HALO_N3DS_MIDPOINT_CAPTURE_TICK >
 #define N3DS_RENDERER_RUN_PURPOSE "algorithm-verification"
 #elif N3DS_RENDERER_ALLOCATION_OBSERVATION
 #define N3DS_RENDERER_RUN_PURPOSE "allocation-observation"
+#elif defined(HALO_N3DS_PROBE_TEXTURE_REBINDS)
+#define N3DS_RENDERER_RUN_PURPOSE "texture-rebind-probe"
+#elif defined(HALO_N3DS_PROBE_WORLD_PIXEL_PASSES)
+#define N3DS_RENDERER_RUN_PURPOSE "world-pixel-passes-probe"
+#elif defined(HALO_N3DS_PROBE_LATE_SKY)
+#define N3DS_RENDERER_RUN_PURPOSE "late-sky-probe"
+#elif defined(HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA)
+#define N3DS_RENDERER_RUN_PURPOSE "opaque-terrain-alpha-probe"
+#elif defined(HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO)
+#define N3DS_RENDERER_RUN_PURPOSE "effect-alpha-zero-probe"
+#elif defined(HALO_N3DS_PROBE_NEUTRAL_MODEL_TINT)
+#define N3DS_RENDERER_RUN_PURPOSE "neutral-model-tint-probe"
 #elif defined(HALO_N3DS_GPU_PROBE) && defined(HALO_N3DS_TEXTURE_VRAM_MIRRORS)
 #define N3DS_RENDERER_RUN_PURPOSE "texture-vram-mirrors-probe"
 #elif defined(HALO_N3DS_GPU_PROBE) && defined(HALO_N3DS_UNUSED_TEXTURE_UNITS)

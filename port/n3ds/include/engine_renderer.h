@@ -17,8 +17,28 @@ struct native_gpu_probe_view {
     float camera[2][12];
     short bounds[2][8];
 };
-void n3ds_gpu_probe_view(const struct native_gpu_probe_view *view, int chord_held);
+void n3ds_gpu_probe_view(const struct native_gpu_probe_view *view, int requested);
 void n3ds_gpu_probe_terrain(int terrain);
+#endif
+#ifdef HALO_N3DS_STARTUP_DIAGNOSTICS
+int n3ds_gpu_startup_diagnostics_status(void);
+#endif
+#ifdef HALO_N3DS_PROBE_PIXEL_PASSES
+enum native_gpu_pixel_pass {
+    NATIVE_GPU_PIXEL_SCENE = 3,
+    NATIVE_GPU_PIXEL_EFFECTS,
+    NATIVE_GPU_PIXEL_TOP_OVERLAY,
+    NATIVE_GPU_PIXEL_BOTTOM,
+    NATIVE_GPU_PIXEL_SKY,
+    NATIVE_GPU_PIXEL_TERRAIN,
+    NATIVE_GPU_PIXEL_MODELS,
+    NATIVE_GPU_PIXEL_CORONAS
+};
+void n3ds_gpu_probe_pixel_pass(enum native_gpu_pixel_pass pass);
+#endif
+#ifdef HALO_N3DS_PROBE_RADAR_INLINE_CLEAR
+int n3ds_gpu_probe_radar_inline_clear(void);
+void n3ds_gpu_probe_radar_clear(int inline_clear);
 #endif
 void n3ds_gpu_world_budget(int enabled);
 struct native_screen_effect {float enhancement,desaturation,tint[3],noise;int additive,video,video_overbright;};
@@ -90,6 +110,10 @@ int n3ds_gpu_model_rigid_draw(const struct native_render_vertex *,const unsigned
     const float rows[12],const float uv[2],int sky,int decal,int two_sided,const struct native_model_material *);
 int n3ds_gpu_model_skin_draw(const struct native_skin_vertex *,const unsigned short *,unsigned int,
     const float *rows,unsigned int nodes,const float uv[2],int sky,int decal,int two_sided,const struct native_model_material *);
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+int n3ds_gpu_model_draw_resident_byte(const void *,const unsigned char *,unsigned int,
+    const float *rows,unsigned int nodes,const float uv[2],int two_sided,int skinned,const struct native_model_material *);
+#endif
 int n3ds_gpu_model_scenery_draw_resident(const void *,const unsigned short *,unsigned int,
     const float *rows,unsigned int instances,const float uv[2],int two_sided,const struct native_model_material *);
 int n3ds_gpu_model_compact_draw_resident(const void *,const unsigned short *,unsigned int,
@@ -139,9 +163,20 @@ int n3ds_gpu_frame_active(void);
 /* True only while an active frame uses mono scanout; stable through a text pass. */
 int n3ds_gpu_frame_is_mono(void);
 #ifdef HALO_N3DS_PRESENT_INTERPOLATION
-/* On success, complete one rasterizer frame and present it before waiting.
+enum n3ds_midpoint_acquire {
+    N3DS_MIDPOINT_ACQUIRED,
+    N3DS_MIDPOINT_ACQUIRE_CONTEXT,
+    N3DS_MIDPOINT_ACQUIRE_GPU_RIGHTS,
+    N3DS_MIDPOINT_ACQUIRE_SWAP_UNPOSTED,
+    N3DS_MIDPOINT_ACQUIRE_SWAP_PENDING,
+    N3DS_MIDPOINT_ACQUIRE_HEADROOM,
+    N3DS_MIDPOINT_ACQUIRE_QUEUE,
+    N3DS_MIDPOINT_ACQUIRE_COUNT,
+};
+/* A nonzero swap deadline permits recording while a posted swap is pending.
  * Its ordinary frame begin consumes the native reservation. */
-int n3ds_gpu_midpoint_try_begin(void);
+enum n3ds_midpoint_acquire n3ds_gpu_midpoint_try_begin(long long swap_deadline);
+int n3ds_gpu_midpoint_prior_swap_pending(void);
 /* Includes the reservation until its rasterizer frame is presented. */
 int n3ds_gpu_midpoint_active(void);
 /* Read after the following keyframe. The transfer path owns the bounded wait. */
@@ -176,6 +211,10 @@ enum { NATIVE_BLEND_ALPHA, NATIVE_BLEND_MULTIPLY, NATIVE_BLEND_DOUBLE_MULTIPLY,
     NATIVE_BLEND_PREMULTIPLIED_ALPHA, NATIVE_BLEND_COUNT };
 int n3ds_gpu_framebuffer_blend(int mode);
 int n3ds_gpu_blend_tests(void);
+#ifdef HALO_N3DS_PROBE_EFFECT_ALPHA_ZERO
+int n3ds_gpu_probe_effect_alpha_zero(void);
+void n3ds_gpu_probe_alpha_effect_draw(int alpha_test);
+#endif
 void n3ds_gpu_window_begin(const struct native_render_camera *camera);
 void n3ds_gpu_present(void);
 int n3ds_gpu_screen_test(void);
@@ -184,11 +223,21 @@ int n3ds_gpu_sky_projection(float matrix[16]);
 int n3ds_gpu_world_projection(float matrix[16]);
 /* Model palettes subtract this origin before PICA's reduced-precision math. */
 int n3ds_gpu_model_projection(float matrix[16],float origin[3]);
+#if HALO_N3DS_ALGO_MODEL_CLIP_BOUNDS == N3DS_ALGORITHM_CANDIDATE
+struct n3ds_model_clip_view;
+const struct n3ds_model_clip_view *n3ds_gpu_model_clip_view(void);
+#endif
 void n3ds_gpu_world_state_restore(void);
 void n3ds_gpu_opaque_sky_begin(void);
 int n3ds_gpu_first_person_begin(float near_clip,float far_clip);
 void n3ds_gpu_first_person_end(void);
 void n3ds_gpu_model_stencil_apply(void);
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+int n3ds_gpu_probe_late_sky(void);
+void n3ds_gpu_late_sky_mark_terrain(int enabled);
+void n3ds_gpu_late_sky_mask(int enabled);
+#endif
+int n3ds_gpu_model_stencil_writes(void);
 int n3ds_gpu_first_person_tests(void);
 int n3ds_gpu_loading_ready(void);
 int n3ds_gpu_loading_draw(float progress);
@@ -240,10 +289,18 @@ const unsigned short *n3ds_gpu_indices_upload(const unsigned short *indices,unsi
 /* Reuse a complete slice in a live renderer arena, or stage external indices
  * once. Persistent callers must still honor the residency epoch below. */
 const unsigned short *n3ds_gpu_indices_prepare(const unsigned short *indices,unsigned int count);
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+/* The caller owns the aligned, flushed linear span until GPU retirement. */
+int n3ds_gpu_indexed_draw_resident(const void *vertices,const unsigned short *indices,
+    unsigned int count,unsigned int stride,unsigned int attributes,unsigned int permutation);
+#endif
 /* An immutable index upload survives until the residency epoch changes.
  * An epoch of zero disables residency. */
 unsigned long long n3ds_gpu_index_residency_epoch(void);
 const unsigned short *n3ds_gpu_indices_upload_resident(const unsigned short *indices,unsigned int count);
+#ifdef HALO_N3DS_BYTE_MODEL_INDICES
+const unsigned char *n3ds_gpu_indices_upload_resident_byte(const unsigned short *indices,unsigned int count);
+#endif
 struct native_render_vertex *n3ds_gpu_model_vertices_allocate(unsigned int count);
 unsigned long long n3ds_gpu_model_frame_serial(void);
 void n3ds_gpu_model_cache_release(void);

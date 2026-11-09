@@ -557,6 +557,36 @@ long first_person_weapon_get_local_index(
 	return (local_player_index==MAXIMUM_NUMBER_OF_LOCAL_PLAYERS) ? NONE : local_player_index;
 }
 
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+boolean n3ds_first_person_allows_late_sky(void)
+{
+	if (render.local_player_index == NONE) return TRUE;
+	long player_index = local_player_get_player_index(render.local_player_index);
+	if (player_index == NONE) return TRUE;
+	long unit_index = player_get(player_index)->unit_index;
+	struct first_person_weapon *first_person = first_person_weapon_get(render.local_player_index);
+	if (unit_index == NONE || first_person->unit_index == NONE || first_person->weapon_index == NONE)
+		return TRUE;
+
+	struct unit_datum *unit = unit_get(unit_index);
+	if (TEST_FLAG(unit->unit.flags, _unit_active_camouflaged_bit) || unit->unit.active_camouflage > 0.f)
+		return FALSE;
+	struct weapon_datum *weapon = weapon_try_and_get(first_person->weapon_index);
+	if (!weapon) return FALSE;
+	struct weapon_definition *definition = weapon_definition_get(weapon->definition_index);
+	if (definition->weapon.interface_definition.first_person_animations.index == NONE)
+		return TRUE;
+	struct game_globals_first_person_interface *interface =
+		TAG_BLOCK_GET_ELEMENT(&scenario_get_game_globals()->first_person_interface,
+			0, struct game_globals_first_person_interface);
+	extern boolean n3ds_first_person_model_allows_late_sky(long);
+	/* Check both declared models before the weapon update can change visibility
+	 * or rebuild its node matrices. Queued translucency runs after the sky. */
+	return n3ds_first_person_model_allows_late_sky(definition->weapon.interface_definition.first_person_model.index) &&
+		n3ds_first_person_model_allows_late_sky(interface->hands.index);
+}
+#endif
+
 void first_person_weapon_draw(
 	void)
 {

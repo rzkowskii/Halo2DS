@@ -112,6 +112,12 @@ boolean render_location_visible(
 struct rendered_cluster *rendered_cluster_get(
 	short rendered_cluster_index);
 
+#ifdef HALO_N3DS_PROBE_LATE_SKY
+void n3ds_render_sky(boolean defer);
+boolean n3ds_sky_draw_pending(void);
+void n3ds_draw_pending_sky(void);
+#endif
+
 /* ---------- prototypes/RENDER_CONTRAILS.C */
 
 void render_contrails_ground_mapped(

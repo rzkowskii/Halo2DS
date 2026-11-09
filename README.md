@@ -2,10 +2,21 @@
 
 Halo3DS brings the original Xbox release of *Halo: Combat Evolved* to the Nintendo 3DS and 2DS family. This fork focuses on making the campaign run better on the New 2DS XL while keeping the game's look and timing.
 
+## 343 Guilty Spark
+
+<p>
+  <img src="docs/screenshots/343-guilty-spark-patrol.png" alt="Covenant patrol carrying blue and gold shields through the swamp" width="49%">
+  <img src="docs/screenshots/343-guilty-spark-clearing.png" alt="Spotlights sweep a flooded clearing during the opening cinematic" width="49%">
+</p>
+
+![First-person swamp gameplay alongside the bottom-screen radar and touch controls](docs/screenshots/343-guilty-spark-gameplay.png)
+
+Captured at native screen resolution in Azahar's New 3DS mode.
+
 ## What's new in this fork
 
 - **Custom controls.** Choose a preset or remap the face buttons, shoulders and D-pad. New and original systems save their layouts separately, and gameplay prompts follow your bindings. Adjust touch and C-stick sensitivity and inversion independently, and tune the C-stick dead zone.
-- **Touch shortcuts.** Double-tap in the bottom screen's aiming area to jump, or tap **RELOAD** at the top centre. Both work with touch drag aiming turned off on New models.
+- **Touch shortcuts.** Tap **RELOAD** at the top or double-tap the aiming area to jump. Along the bottom, tap **LIGHT** to toggle the flashlight, **FRAG** or **PLASMA** to select a grenade, and **MELEE** to attack. The shortcuts work with touch drag aiming turned off on New models.
 - **Graphics options.** Choose **Auto**, **Native** (400×240), **Balanced** (320×192), **Performance** (280×168), or **Lowest** (200×120). Smaller world views reduce the number of pixels the GPU draws. The HUD and menus stay sharp. On New models, a separate **Texture Detail** setting controls world detail textures and applies on the next map load.
 - **Less work per frame.** The renderer reuses geometry, textures, lighting and material state, skips hidden terrain, and groups compatible draws. Removing unused bottom-screen depth storage frees **300 KiB** of video memory. Animation, AI and pathfinding also reuse calculations where their inputs match.
 - **Less work during saves and streaming.** Checkpoints use faster checksums and can keep snapshots in RAM for quick reverts. Persistent saves can compress in the background, and map reads use a separate lock. Audio can prepare samples ahead of use on New models.

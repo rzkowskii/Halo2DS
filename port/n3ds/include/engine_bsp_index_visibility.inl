@@ -71,6 +71,9 @@ static const unsigned short *bsp_visible_index_buffer(struct native_geometry *g,
    if(g->filtered[eye]){
     assert(bsp_visible_material_indices(g,visibility,key,g->filtered[eye])==kept);
     n3ds_gpu_geometry_flush(g->filtered[eye],kept*2);
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+    ++g->filter_revision[eye];
+#endif
    }else kept=g->index_count; /* Cache low-memory fallback until visibility changes. */
   }
   g->filter_count[eye]=kept;memcpy(g->filter_key[eye],key,sizeof(key));g->filter_ready[eye]=1;++bsp_filter_builds;

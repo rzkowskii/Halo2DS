@@ -85,8 +85,16 @@
     X(N3DS_ALG_IO_SOUND_LOAD_TICKS,"sound_load_ticks") \
     X(N3DS_ALG_IO_SOUND_STAGE_HITS,"sound_stage_hit_count") \
     X(N3DS_ALG_IO_SOUND_STAGE_MISSES,"sound_stage_miss_count") \
+    X(N3DS_ALG_IO_SOUND_STAGE_ABSENT,"sound_stage_absent_count") \
+    X(N3DS_ALG_IO_SOUND_STAGE_LATE,"sound_stage_late_count") \
+    X(N3DS_ALG_IO_SOUND_STAGE_FAILED,"sound_stage_failed_count") \
+    X(N3DS_ALG_IO_SOUND_STAGE_LINK_HINTS,"sound_stage_link_hint_count") \
+    X(N3DS_ALG_IO_SOUND_STAGE_LINK_HITS,"sound_stage_link_hit_count") \
+    X(N3DS_ALG_IO_SOUND_STAGE_NEIGHBOR_HINTS,"sound_stage_neighbor_hint_count") \
+    X(N3DS_ALG_IO_SOUND_STAGE_NEIGHBOR_HITS,"sound_stage_neighbor_hit_count") \
     X(N3DS_ALG_IO_SOUND_STAGE_BYTES,"sound_stage_copy_bytes") \
     X(N3DS_ALG_IO_SOUND_STAGE_COPY_TICKS,"sound_stage_copy_ticks") \
+    X(N3DS_ALG_IO_SOUND_IDLE_DEFERS,"sound_idle_deferred_count") \
     X(N3DS_ALG_IO_SOUND_READS,"sound_sync_read_count") \
     X(N3DS_ALG_IO_SOUND_READ_FAILS,"sound_sync_read_fail_count") \
     X(N3DS_ALG_IO_SOUND_READ_BYTES,"sound_sync_read_bytes") \

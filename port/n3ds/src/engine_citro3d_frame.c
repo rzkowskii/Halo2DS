@@ -32,26 +32,39 @@ void n3ds_gpu_top_swap_posted(void);
  * run in submission order and can lag the queue's idle flag. A missing
  * identity rejects the sample instead of extending the ordinary GPU wait. */
 enum { GPU_PROBE_QUEUE_SLOTS = 8 };
-static u32 probe_queue_start[GPU_PROBE_QUEUE_SLOTS], probe_queue_ticks[GPU_PROBE_QUEUE_SLOTS];
+enum { GX_COMMAND_LIST = 1 }; /* Low byte of libctru's GX_ProcessCommandList packet. */
+static struct {
+    u32 start, ticks, draw_ticks, lists, p3d_expected;
+} probe_queue[GPU_PROBE_QUEUE_SLOTS];
 static u32 probe_queue_issued, probe_queue_retired, probe_queue_invalid;
+static u32 probe_p3d_scheduled, probe_p3d_observed, probe_p3d_tick;
+
+static void probe_p3d_event(void *unused)
+{
+    (void)unused;
+    probe_p3d_tick = (u32)svcGetSystemTick();
+    __atomic_add_fetch(&probe_p3d_observed, 1, __ATOMIC_RELEASE);
+}
 
 u32 n3ds_c3d_gpu_probe_submission(void)
 {
     return __atomic_load_n(&probe_queue_issued, __ATOMIC_ACQUIRE);
 }
 
-int n3ds_c3d_gpu_probe_sample(u32 submission, u32 *ticks)
+int n3ds_c3d_gpu_probe_sample(u32 submission, u32 *ticks, u32 *draw_ticks)
 {
     u32 issued = n3ds_c3d_gpu_probe_submission();
     u32 retired = __atomic_load_n(&probe_queue_retired, __ATOMIC_ACQUIRE);
     if (__atomic_load_n(&probe_queue_invalid, __ATOMIC_ACQUIRE) || !submission ||
         submission > retired || issued - submission >= GPU_PROBE_QUEUE_SLOTS)
         return 0;
-    *ticks = probe_queue_ticks[submission % GPU_PROBE_QUEUE_SLOTS];
+    u32 slot = submission % GPU_PROBE_QUEUE_SLOTS;
+    *ticks = probe_queue[slot].ticks;
+    *draw_ticks = probe_queue[slot].draw_ticks;
     return *ticks != 0;
 }
 
-static void probe_queue_run(void)
+static void probe_queue_run(const gxCmdQueue_s *queue)
 {
     u32 issued = n3ds_c3d_gpu_probe_submission();
     u32 retired = __atomic_load_n(&probe_queue_retired, __ATOMIC_ACQUIRE);
@@ -59,7 +72,14 @@ static void probe_queue_run(void)
         __atomic_store_n(&probe_queue_invalid, 1, __ATOMIC_RELEASE);
         return;
     }
-    probe_queue_start[(issued + 1) % GPU_PROBE_QUEUE_SLOTS] = (u32)svcGetSystemTick();
+    u32 slot = (issued + 1) % GPU_PROBE_QUEUE_SLOTS;
+    u32 lists = 0;
+    for (unsigned int i = queue->lastEntry; i < queue->numEntries; ++i)
+        lists += queue->entries[i].type == GX_COMMAND_LIST;
+    probe_p3d_scheduled += lists;
+    probe_queue[slot].lists = lists;
+    probe_queue[slot].p3d_expected = probe_p3d_scheduled;
+    probe_queue[slot].start = (u32)svcGetSystemTick();
     __atomic_store_n(&probe_queue_issued, issued + 1, __ATOMIC_RELEASE);
 }
 
@@ -73,7 +93,15 @@ static void probe_queue_complete(void)
     }
     u32 slot = (retired + 1) % GPU_PROBE_QUEUE_SLOTS;
     /* The existing five-second queue watchdog is shorter than one tick wrap. */
-    probe_queue_ticks[slot] = now - probe_queue_start[slot];
+    u32 ticks = now - probe_queue[slot].start;
+    u32 draw_ticks = probe_p3d_tick - probe_queue[slot].start;
+    probe_queue[slot].ticks = ticks;
+    /* libctru calls the queue callback before the current interrupt's event
+     * callback. If P3D itself ends the queue, only total time is available.
+     * Cumulative counts keep a late P3D out of the following sample. */
+    probe_queue[slot].draw_ticks = probe_queue[slot].lists && draw_ticks <= ticks &&
+        __atomic_load_n(&probe_p3d_observed, __ATOMIC_RELAXED) == probe_queue[slot].p3d_expected ?
+        draw_ticks : 0;
     __atomic_store_n(&probe_queue_retired, retired + 1, __ATOMIC_RELEASE);
 }
 #endif
@@ -102,6 +130,16 @@ static void halo_c3d_queue_finish(gxCmdQueue_s *queue)
 
 static void halo_c3d_set_queue_callback(gxCmdQueue_s *queue, void (*callback)(gxCmdQueue_s *), void *user)
 {
+#ifdef HALO_N3DS_GPU_PROBE
+    /* Track only this C3D queue's lifetime. HOME can disable VBlank callbacks
+     * temporarily while the GX queue remains bound. */
+    if (callback == onQueueFinish) {
+        probe_p3d_scheduled = __atomic_load_n(&probe_p3d_observed, __ATOMIC_ACQUIRE);
+        gspSetEventCallback(GSPGPU_EVENT_P3D, probe_p3d_event, NULL, false);
+    } else if (!callback) {
+        gspSetEventCallback(GSPGPU_EVENT_P3D, NULL, NULL, false);
+    }
+#endif
     gxCmdQueueSetCallback(queue, callback == onQueueFinish ? halo_c3d_queue_finish : callback, user);
 }
 
@@ -115,7 +153,7 @@ static void halo_c3d_run_queue(gxCmdQueue_s *queue)
          * outside an active capture window. This does not start extra work. */
         n3ds_trace_queue_run();
 #ifdef HALO_N3DS_GPU_PROBE
-        probe_queue_run();
+        probe_queue_run(queue);
 #endif
     }
     gxCmdQueueRun(queue);

@@ -36,6 +36,32 @@ _Static_assert(sizeof(global_window_parameters) == 600, "Original window ABI");
 _Static_assert(sizeof(struct native_render_vertex) == 32, "GPU vertex ABI");
 
 enum { GEOMETRY_SLOTS=512 };
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+#include "engine_model_clip_bounds.h"
+#if HALO_N3DS_ALGO_BSP_CLIP_HIERARCHY == N3DS_ALGORITHM_CANDIDATE
+enum { BSP_CLIP_CHILDREN=4 };
+#else
+enum { BSP_CLIP_CHILDREN=1 };
+#endif
+enum { BSP_CLIP_ELEMENTS=32*3, BSP_CLIP_MAX_ELEMENTS=16384,
+       BSP_CLIP_LEAF_ELEMENTS=BSP_CLIP_ELEMENTS/BSP_CLIP_CHILDREN,
+       BSP_CLIP_WORDS=(BSP_CLIP_MAX_ELEMENTS+BSP_CLIP_LEAF_ELEMENTS*32-1)/(BSP_CLIP_LEAF_ELEMENTS*32) };
+struct bsp_clip_block { float center[3],extent[3],magnitude[3];int valid; };
+struct bsp_clip_group {
+    struct bsp_clip_block bounds;
+#if HALO_N3DS_ALGO_BSP_CLIP_HIERARCHY == N3DS_ALGORITHM_CANDIDATE
+    struct bsp_clip_block children[BSP_CLIP_CHILDREN];
+#endif
+};
+struct bsp_clip_cache {
+    struct bsp_clip_group *blocks;
+    const unsigned short *source;
+    unsigned short *indices;
+    unsigned int count,revision,kept,rejected[BSP_CLIP_WORDS];
+    unsigned long long used_frame,view;
+    int ready,disabled;
+};
+#endif
 struct native_geometry {
     const struct vertex_buffer *source;
     struct native_render_vertex *vertices;
@@ -48,6 +74,10 @@ struct native_geometry {
     unsigned short *filtered[2];
     unsigned int filter_count[2],filter_key[2][MAXIMUM_CLUSTERS_PER_STRUCTURE/32],filter_frame[2];
     int filter_ready[2];
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+    unsigned int filter_revision[2];
+    struct bsp_clip_cache clip;
+#endif
     float *light_uv;
     int lightmap_valid;
     const struct shader *detail_shader;
@@ -77,6 +107,9 @@ static unsigned int geometry_count;
 static unsigned int bsp_compact_map_bytes;
 static int frame_state, diffuse_active;
 #include "engine_bsp_index_visibility.inl"
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+#include "engine_bsp_clip.inl"
+#endif
 #include "engine_bsp_batch.inl"
 long long n3ds_engine_ticks(void);
 static long long frame_service_ticks[3];
@@ -125,7 +158,14 @@ void n3ds_engine_geometry_flush(void)
         for(int eye=0;eye<2;++eye)n3ds_gpu_geometry_free(geometry[i].filtered[eye]);
         n3ds_gpu_geometry_free(geometry[i].light_uv);
         n3ds_gpu_geometry_free(geometry[i].bump);
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+        bsp_clip_release(&geometry[i].clip);
+#endif
     }
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+    n3ds_bsp_clip_report();
+    bsp_clip_metadata_bytes=bsp_clip_index_bytes=0;
+#endif
     extern void n3ds_log(const char *);
     char message[128];snprintf(message,sizeof(message),"BSP INDEX CACHE: hits=%u misses=%u bytes=%u released=%u",
         bsp_index_hits,bsp_index_misses,bsp_index_bytes,bsp_index_bytes);n3ds_log(message);
@@ -354,7 +394,14 @@ void rasterizer_draw_dynamic_triangles_static_vertices(long handle, long first,
         assert(triangles->indices[first*3+i]<source->count);
     assert(n3ds_gpu_geometry_draw(vertices,triangles->indices+first*3,count*3));
 }
-void _rasterizer_environment_diffuse_textures_begin(void) { assert(frame_state==3 && !diffuse_active && !bsp_packet_count); diffuse_active=1; }
+void _rasterizer_environment_diffuse_textures_begin(void)
+{
+    assert(frame_state==3 && !diffuse_active && !bsp_packet_count);
+    diffuse_active=1;
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+    bsp_clip_begin();
+#endif
+}
 void _rasterizer_environment_diffuse_textures_end(void) { assert(diffuse_active); bsp_batch_flush();n3ds_gpu_world_state_restore();diffuse_active=0; }
 void _rasterizer_environment_diffuse_texture_draw(const struct shader *shader, short bitmap_index,
     long handle, long first, long count, const struct vertex_buffer *source)
@@ -618,6 +665,10 @@ void n3ds_engine_bsp_draw(const struct shader *shader,short bitmap_index,
             }
             entry->emission_ready=1;
         }
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+        visible_indices=bsp_clip_material_indices(entry,visible_indices,&count);
+        if(!count) return;
+#endif
         if(entry->plasma) {assert(n3ds_gpu_environment_plasma_draw(vertices,entry->light_uv,visible_indices,count,lightmap,
             lightmap?entry->material_color:0xffffffffu,!!(environment->flags&1),&entry->emission,entry->plasma_on,entry->plasma_phase));}
         else {assert(n3ds_gpu_environment_emission_draw(vertices,entry->light_uv,visible_indices,count,lightmap,
@@ -632,6 +683,10 @@ void n3ds_engine_bsp_draw(const struct shader *shader,short bitmap_index,
        isfinite(environment->material_color[0]) && isfinite(environment->material_color[1]) && isfinite(environment->material_color[2])) {
         environment_bump_prepare(entry,source,lightmap_source);
         if(entry->bump && rasterizer_set_texture_bitmap_data(2,entry->bitmap_metadata[2])) {
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+            visible_indices=bsp_clip_material_indices(entry,visible_indices,&count);
+            if(!count) return;
+#endif
             assert(n3ds_gpu_environment_bump_draw(vertices,entry->bump,visible_indices,count,environment->runtime_bump_scale[0],environment->runtime_bump_scale[1],entry->material_color,!!(environment->flags&1)));
             ++bsp_bump_draws;++bsp_lightmap_draws;return;
         }
@@ -673,5 +728,11 @@ void n3ds_engine_bsp_draw(const struct shader *shader,short bitmap_index,
             .material=lightmap?entry->material_color:0xffffffffu
         };
         bsp_batch_submit(&packet);
-    } else assert(n3ds_gpu_environment_draw(vertices,entry->light_uv,visible_indices,count,lightmap,detail,detail?entry->detail_scale[0]:1.f,detail?entry->detail_scale[1]:1.f,lightmap?entry->material_color:0xffffffffu,!!(environment->flags&1)));
+    } else {
+#if HALO_N3DS_ALGO_BSP_CLIP_BLOCKS == N3DS_ALGORITHM_CANDIDATE
+        visible_indices=bsp_clip_material_indices(entry,visible_indices,&count);
+        if(!count) return;
+#endif
+        assert(n3ds_gpu_environment_draw(vertices,entry->light_uv,visible_indices,count,lightmap,detail,detail?entry->detail_scale[0]:1.f,detail?entry->detail_scale[1]:1.f,lightmap?entry->material_color:0xffffffffu,!!(environment->flags&1)));
+    }
 }

@@ -38,31 +38,35 @@ static boolean sound_in_map(const struct n3ds_cache_view *view,const struct soun
     return sound && (unsigned long)sound%__alignof__(struct sound_permutation)==0 &&
         n3ds_cache_resolve(view,sound,sizeof(*sound))==sound;
 }
-static boolean owns_sound(const struct n3ds_cache_view *view,const struct sound_permutation *sound)
+static const struct sound_pitch_range *find_sound_range(const struct n3ds_cache_view *view,
+    const struct sound_permutation *sound,const struct sound_definition **owner)
 {
     struct cache_file_tag_instance *tag;
     struct sound_definition *definition;
     struct sound_pitch_range *ranges;
     long i;
-    if (!sound_in_map(view,sound)) return FALSE;
+    if (!sound_in_map(view,sound)) return NULL;
     tag=n3ds_cache_tag(view,sound->unknown3,'snd!');
-    if (!tag) return FALSE;
+    if (!tag) return NULL;
     definition=n3ds_cache_resolve(view,tag->base_address,sizeof(*definition));
-    if (!definition || definition->pitch_ranges.count<0 || definition->pitch_ranges.count>8) return FALSE;
+    if (!definition || definition->pitch_ranges.count<0 || definition->pitch_ranges.count>8) return NULL;
     ranges=n3ds_cache_resolve(view,definition->pitch_ranges.address,definition->pitch_ranges.count*sizeof(*ranges));
-    if (!ranges) return FALSE;
+    if (!ranges) return NULL;
     for (i=0;i<definition->pitch_ranges.count;++i) {
         struct sound_permutation *permutations;
-        if (ranges[i].permutations.count<0 || ranges[i].permutations.count>256) return FALSE;
+        if (ranges[i].permutations.count<0 || ranges[i].permutations.count>256) return NULL;
         permutations=n3ds_cache_resolve(view,ranges[i].permutations.address,ranges[i].permutations.count*sizeof(*sound));
-        if (!permutations) return FALSE;
+        if (!permutations) return NULL;
         /* All permutations are a validated contiguous tag block. Membership
          * needs one bounds/alignment check, not a scan on every voice update. */
         unsigned long address=(unsigned long)sound,base=(unsigned long)permutations;
         unsigned long bytes=ranges[i].permutations.count*sizeof(*sound);
-        if(address>=base && address-base<bytes && (address-base)%sizeof(*sound)==0) return TRUE;
+        if(address>=base && address-base<bytes && (address-base)%sizeof(*sound)==0) {
+            if (owner) *owner=definition;
+            return ranges+i;
+        }
     }
-    return FALSE;
+    return NULL;
 }
 static long handle(const struct sound_entry *entry)
 {
@@ -77,6 +81,57 @@ static struct sound_entry *lookup(const struct sound_permutation *sound)
      * current tag lifetime retain that proof for warm queries. */
     return entry->sound==sound && handle(entry)==sound->unknown0 &&
         entry->map_generation==n3ds_engine_tag_generation() ? entry : NULL;
+}
+static void stage_hint(const struct sound_permutation *sound,int neighbor)
+{
+    const struct sound_entry *entry=lookup(sound);
+    if (entry && entry->data) return;
+    /* Range-only staging reserves no sound cache slot and never advances a
+     * permutation. The normal idle or blocking load still publishes it. */
+    struct n3ds_sound_read_key key={n3ds_engine_tag_generation(),0,sound->samples.file_offset,sound->samples.size};
+    char path[128];
+    if (!key.bytes || key.bytes>N3DS_SOUND_LINK_READ_LIMIT ||
+        !n3ds_engine_cache_read_path(key.offset,key.bytes,path)) return;
+    if (neighbor) n3ds_sound_reader_predict_neighbor(path,&key);
+    else n3ds_sound_reader_predict(path,&key);
+}
+static void stage_packed_neighbor(const struct sound_permutation *sound,
+    const struct sound_permutation *permutations,long roots)
+{
+    if (sound-permutations>=roots) return;
+    const struct sound_permutation *nearest=NULL;
+    unsigned int best_gap=4097;
+    unsigned int start=sound->samples.file_offset,size=sound->samples.size;
+    if (!size || start>~0u-size) return;
+    unsigned int end=start+size;
+    /* Cooked linked loops often pack their selectable roots together. Hint
+     * only the nearest cold sibling and leave the original RNG selection alone. */
+    for (long i=0;i<roots;++i) {
+        const struct sound_permutation *sibling=permutations+i;
+        unsigned int offset=sibling->samples.file_offset,bytes=sibling->samples.size;
+        if (offset<2048 || !bytes || bytes>N3DS_SOUND_LINK_READ_LIMIT || offset>~0u-bytes) continue;
+        unsigned int gap;
+        if (offset>=end) gap=offset-end;
+        else if (offset+bytes<=start) gap=start-offset-bytes;
+        else continue;
+        if (gap<best_gap && !lookup(sibling)) {
+            best_gap=gap;
+            nearest=sibling;
+        }
+    }
+    if (nearest) stage_hint(nearest,1);
+}
+void n3ds_engine_sound_stage_next(const struct sound_permutation *sound)
+{
+    if (!read_ahead || sound->next_permutation_index<0) return;
+    const struct sound_definition *definition;
+    const struct sound_pitch_range *range=find_sound_range(n3ds_engine_cache_view(0),sound,&definition);
+    if (!range || !TEST_FLAG(definition->flags,_sound_definition_linked_permutations_bit) ||
+            range->forced_permutation_index!=NONE || sound->next_permutation_index>=range->permutations.count) return;
+    const struct sound_permutation *permutations=range->permutations.address;
+    stage_hint(permutations+sound->next_permutation_index,0);
+    long roots=range->actual_permutation_count;
+    if (roots>1 && roots<=range->permutations.count) stage_packed_neighbor(sound,permutations,roots);
 }
 static struct n3ds_sound_read_key read_key(const struct sound_entry *entry)
 {
@@ -95,12 +150,8 @@ static void stage_first_pending(void)
     char path[128];
     if (!read_ahead || first_pending==SOUND_SLOTS) return;
     struct n3ds_sound_read_key key=read_key(entries+first_pending);
-    if (!key.bytes || key.bytes>N3DS_SOUND_READ_LIMIT ||
-        !n3ds_engine_cache_read_path(key.offset,key.bytes,path)) {
-        n3ds_sound_reader_cancel();
-        return;
-    }
-    n3ds_sound_reader_offer(path,&key);
+    if (key.bytes && key.bytes<=N3DS_SOUND_READ_LIMIT &&
+        n3ds_engine_cache_read_path(key.offset,key.bytes,path)) n3ds_sound_reader_offer(path,&key);
 }
 static void release(struct sound_entry *entry)
 {
@@ -135,13 +186,13 @@ void sound_cache_close(void) { n3ds_engine_sounds_unload(); opened=read_ahead=FA
 void sound_cache_delete(void) { sound_cache_close(); initialized=FALSE; }
 void sound_cache_sound_new(long tag_index,struct sound_permutation *sound)
 {
-    assert(owns_sound(n3ds_engine_cache_view(0),sound) && !lookup(sound) && !sound->unknown1 && tag_index!=0);
+    assert(find_sound_range(n3ds_engine_cache_view(0),sound,NULL) && !lookup(sound) && !sound->unknown1 && tag_index!=0);
     sound->unknown0=NONE; sound->unknown1=0; sound->unknown2=tag_index;
 }
 void sound_cache_sound_delete(struct sound_permutation *sound)
 {
     struct sound_entry *entry=lookup(sound);
-    assert(owns_sound(n3ds_engine_cache_view(0),sound));
+    assert(find_sound_range(n3ds_engine_cache_view(0),sound,NULL));
     if (entry) release(entry);
     else { assert(sound->unknown0==NONE && !sound->unknown1); }
 }
@@ -210,6 +261,7 @@ static boolean load(struct sound_entry *entry)
 #endif
         int read=n3ds_engine_cache_read(key.offset,size,data);
         n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_READ_TICKS,n3ds_engine_ticks()-start);
+        if (read_ahead) n3ds_sound_reader_resume();
         n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_READS,1);
         if(!read) {
             n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_READ_FAILS,1);
@@ -230,6 +282,34 @@ void sound_cache_idle(void)
     n3ds_algorithm_profile_max(N3DS_ALG_IO_SOUND_PEAK_BYTES,used_bytes);
     n3ds_algorithm_profile_max(N3DS_ALG_IO_SOUND_PEAK_SLOTS,used_slots);
     if (first_pending<SOUND_SLOTS) {
+#ifdef HALO_N3DS_ASYNC_SOUND_IDLE
+        enum n3ds_sound_read_status status=N3DS_SOUND_READ_UNAVAILABLE;
+        struct sound_entry *entry=entries+first_pending;
+        if (read_ahead) {
+            struct n3ds_sound_read_key key=read_key(entry);
+            status=n3ds_sound_reader_status(&key);
+            if (status==N3DS_SOUND_READ_UNAVAILABLE) {
+                stage_first_pending();
+                status=n3ds_sound_reader_status(&key);
+            }
+        }
+        if (status==N3DS_SOUND_READ_WAITING) {
+            /* Keep the cache entry pending. Sound classes already choose
+             * how to handle a cache miss while this read finishes. */
+            n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_IDLE_DEFERS,1);
+            return;
+        }
+        if (status==N3DS_SOUND_READ_FAILED) {
+            n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_STAGE_FAILED,1);
+            n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_LOAD_FAILS,1);
+            release(entry);
+            stage_first_pending();
+            return;
+        }
+        /* Only the owner can replace the completed stage before load()
+         * copies it. An unavailable worker or oversized sample retains
+         * the original blocking path. Explicit block requests do too. */
+#endif
         n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_IDLE_LOADS,1);
         load(entries+first_pending);
         stage_first_pending();
@@ -246,7 +326,7 @@ boolean _sound_cache_sound_request(struct sound_permutation *sound, boolean bloc
     n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_READY_HITS,entry && entry->data);
     if (!entry) {
         const struct n3ds_cache_view *view=n3ds_engine_cache_view(0);
-        if (!fetch || !owns_sound(view,sound) || sound->unknown0!=NONE) return FALSE;
+        if (!fetch || !find_sound_range(view,sound,NULL) || sound->unknown0!=NONE) return FALSE;
         unsigned long offset=sound->samples.file_offset;
         long size=sound->samples.size;
         if (size<=0 || size>SOUND_BUDGET || offset<2048 || offset>(unsigned long)view->header.file_length ||
@@ -273,7 +353,13 @@ boolean _sound_cache_sound_request(struct sound_permutation *sound, boolean bloc
     }
     entry->age=++sequence;
     n3ds_algorithm_profile_add(N3DS_ALG_IO_SOUND_BLOCK_LOADS,block && !entry->data);
-    if (!entry->data && (!block || !load(entry))) return FALSE;
+    if (!entry->data) {
+        if (!block) return FALSE;
+        unsigned int previous_pending=first_pending;
+        boolean loaded=load(entry);
+        if (first_pending!=previous_pending) stage_first_pending();
+        if (!loaded) return FALSE;
+    }
     if (reference) { assert(entry->software<255); ++entry->software; }
     return TRUE;
 }

@@ -97,6 +97,9 @@ unsigned int n3ds_gpu_texture_revision_publish(void *resource);
 /* Unpublished resources return zero and require exact content comparison. */
 unsigned int n3ds_gpu_texture_content_id(void *resource);
 int n3ds_gpu_texture_identity_tests(void);
+#ifdef HALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA
+int n3ds_gpu_base_texture_opaque(void);
+#endif
 void texture_cache_flush(void);
 void texture_cache_open(void);
 void texture_cache_close(void);

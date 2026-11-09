@@ -619,8 +619,8 @@ static void tune_aim(void)
 
 static unsigned int gesture_targets(unsigned int x,unsigned int y)
 {
-    if(x>=NATIVE_TOUCH_RELOAD_X && x<NATIVE_TOUCH_RELOAD_X+NATIVE_TOUCH_RELOAD_WIDTH &&
-       y>=NATIVE_TOUCH_RELOAD_Y && y<NATIVE_TOUCH_RELOAD_Y+NATIVE_TOUCH_RELOAD_HEIGHT)
+    if(x>=NATIVE_TOUCH_RELOAD_TAP_X && x<NATIVE_TOUCH_RELOAD_TAP_X+NATIVE_TOUCH_RELOAD_TAP_WIDTH &&
+       y>=NATIVE_TOUCH_RELOAD_TAP_Y && y<NATIVE_TOUCH_RELOAD_TAP_Y+NATIVE_TOUCH_RELOAD_TAP_HEIGHT)
         return NATIVE_TOUCH_RELOAD;
     return y<NATIVE_TOUCH_AIM_BOTTOM ? NATIVE_TOUCH_AIM|NATIVE_TOUCH_JUMP : 0;
 }
@@ -636,6 +636,8 @@ static void touch_gestures(void)
 {
     const struct gamepad_state *pad=input_get_gamepad_state(0);
     struct native_control_settings saved,tuned;
+    const int reload_x=NATIVE_TOUCH_RELOAD_X+NATIVE_TOUCH_RELOAD_WIDTH/2;
+    const int reload_bottom=NATIVE_TOUCH_RELOAD_TAP_Y+NATIVE_TOUCH_RELOAD_TAP_HEIGHT;
     n3ds_controls_get(&saved);
     tuned=saved;tuned.touch_aim=0;
     n3ds_controls_set(&tuned);
@@ -674,7 +676,7 @@ static void touch_gestures(void)
     CHECK(!pad->buttons[_gamepad_analog_button_a]);
 
     /* Reload consumes a new contact and cannot turn into jump or aim. */
-    touch_sample(NATIVE_KEY_TOUCH,160,16,60);
+    touch_sample(NATIVE_KEY_TOUCH,reload_x,reload_bottom-1,60);
     CHECK(n3ds_input_touch_reload_pressed());
     CHECK(!pad->buttons[_gamepad_analog_button_x] && !pad->buttons[_gamepad_analog_button_a]);
     touch_sample(NATIVE_KEY_TOUCH,105,100,32);
@@ -684,12 +686,12 @@ static void touch_gestures(void)
 
     tuned.touch_aim=1;
     n3ds_controls_set(&tuned);
-    touch_sample(NATIVE_KEY_TOUCH,160,41,60);
-    touch_sample(NATIVE_KEY_TOUCH,161,40,32);
+    touch_sample(NATIVE_KEY_TOUCH,reload_x,reload_bottom+1,60);
+    touch_sample(NATIVE_KEY_TOUCH,reload_x+1,reload_bottom,32);
     CHECK(pad->sticks[1].x && pad->sticks[1].y);
-    touch_sample(NATIVE_KEY_TOUCH,161,36,32);
+    touch_sample(NATIVE_KEY_TOUCH,reload_x+1,reload_bottom-1,32);
     CHECK(!n3ds_input_touch_reload_pressed() && !pad->sticks[1].x && !pad->sticks[1].y);
-    touch_sample(NATIVE_KEY_TOUCH,160,45,32);
+    touch_sample(NATIVE_KEY_TOUCH,reload_x,reload_bottom+1,32);
     CHECK(!n3ds_input_touch_reload_pressed() && !pad->sticks[1].x && !pad->sticks[1].y);
     touch_sample(0,0,0,32);
 
@@ -703,10 +705,10 @@ static void touch_gestures(void)
     touch_sample(0,0,0,32);
     CHECK(!pad->buttons[_gamepad_analog_button_a]);
     n3ds_input_gameplay_controls(0);
-    touch_sample(NATIVE_KEY_TOUCH,160,16,32);
+    touch_sample(NATIVE_KEY_TOUCH,reload_x,reload_bottom-1,32);
     CHECK(!n3ds_input_touch_reload_pressed());
     n3ds_input_gameplay_controls(1);
-    touch_sample(NATIVE_KEY_TOUCH,160,16,32);
+    touch_sample(NATIVE_KEY_TOUCH,reload_x,reload_bottom-1,32);
     CHECK(!n3ds_input_touch_reload_pressed());
     touch_sample(0,0,0,32);
     touch_sample(NATIVE_KEY_TOUCH,105,100,60);

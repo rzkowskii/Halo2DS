@@ -4,7 +4,6 @@
 #include <stdio.h>
 #include "engine_text.h"
 #include "engine_hud.h"
-#include "engine_input.h"
 #include "engine_textures.h"
 #include "engine_renderer.h"
 #include "engine_presentation.h"
@@ -22,7 +21,8 @@ static unsigned int used;
 static unsigned int deferred,immediate,flushes;
 static int dirty;
 static unsigned int batch_first;
-static int batch_supported,batch_active;
+static int batch_supported;
+static enum { TEXT_BATCH_NONE, TEXT_BATCH_SCREEN, TEXT_BATCH_OFFSCREEN } batch_active;
 void n3ds_log(const char *message);
 long long n3ds_engine_ticks(void);
 static int point_sampled,wrapped;
@@ -34,7 +34,8 @@ static float sensor_x=42,sensor_y=438,sensor_scale=128.f/42.f;
 void n3ds_gpu_hud_layout(int group) {hud_layout=group;}
 void n3ds_gpu_hud_sensor_origin(float x,float y,float radius)
 {sensor_x=x;sensor_y=y;sensor_scale=128.f/radius;}
-int n3ds_gpu_touch_panel(const unsigned int *pixels,unsigned int revision)
+int n3ds_gpu_touch_panel(const unsigned int *pixels,unsigned int revision,
+    const struct native_touch_button *buttons,unsigned int count)
 {
     if(!touch_ready) {
         if(!C3D_TexInit(&touch_texture,512,64,GPU_RGBA8)) return 0;
@@ -51,30 +52,28 @@ int n3ds_gpu_touch_panel(const unsigned int *pixels,unsigned int revision)
         }
         C3D_TexFlush(&touch_texture);touch_revision=revision;
     }
-    struct native_text_vertex v[4]={0};
-    static const float uv[4][2]={{0,0},{1,0},{1,1},{0,1}};
-    for(int i=0;i<4;++i) {
-        v[i].position[0]=512*uv[i][0];v[i].position[1]=184+64*uv[i][1];
-        v[i].uv[0]=uv[i][0];v[i].uv[1]=uv[i][1];
-        for(int j=0;j<4;++j) v[i].color[j]=1;
-    }
+    /* Submit only the button rectangles, in one batch when supported. */
+    static const float corners[4][2]={{0,0},{1,0},{1,1},{0,1}};
     void *saved=n3ds_gpu_texture_bound(0);
     n3ds_gpu_texture_bind(0,&touch_texture);
     int ok=n3ds_gpu_text_begin(320,240,0xffffffff,1,0);
     n3ds_gpu_framebuffer_blend(NATIVE_BLEND_ALPHA);
-    if(ok) ok=n3ds_gpu_text_draw(v);
-    if(ok) {
-        /* The reload face shares the existing control atlas and sampler. */
+    int batched=ok && n3ds_gpu_text_batch_begin();
+    for(unsigned int button=0;ok && button<count;++button) {
+        const struct native_touch_rect *rect=&buttons[button].screen;
+        struct native_text_vertex v[4];
         for(int i=0;i<4;++i) {
-            float x=NATIVE_TOUCH_RELOAD_WIDTH*uv[i][0];
-            float y=NATIVE_TOUCH_RELOAD_HEIGHT*uv[i][1];
-            v[i].position[0]=NATIVE_TOUCH_RELOAD_X+x;
-            v[i].position[1]=NATIVE_TOUCH_RELOAD_Y+y;
-            v[i].uv[0]=(NATIVE_TOUCH_RELOAD_ATLAS_X+x)/512.f;
+            float x=rect->width*corners[i][0];
+            float y=rect->height*corners[i][1];
+            v[i].position[0]=rect->x+x;
+            v[i].position[1]=rect->y+y;
+            v[i].uv[0]=(buttons[button].atlas_x+x)/512.f;
             v[i].uv[1]=y/64.f;
+            for(int j=0;j<4;++j) v[i].color[j]=1;
         }
         ok=n3ds_gpu_text_draw(v);
     }
+    if(batched && !n3ds_gpu_text_batch_end()) ok=0;
     n3ds_gpu_texture_bind(0,saved);n3ds_gpu_world_state_restore();
     return ok;
 }
@@ -89,7 +88,7 @@ void n3ds_gpu_text_dispose(void)
     if(shader) DVLB_Free(shader);
     linearFree(stream); stream=NULL; shader=NULL; program_ready=0; used=0;
     projection_width=projection_height=0;
-    batch_active=batch_supported=0;
+    batch_active=TEXT_BATCH_NONE;batch_supported=0;
 }
 /* Map-owned copied HUD images may sit between large freed tag blocks. Fixed
  * text streams/shaders remain allocated; these images are recreated lazily. */
@@ -184,8 +183,14 @@ int n3ds_gpu_text_batch_begin(void)
     /* Slider-off 3DS frames have the same single-target glyph path as 2DS.
      * Stereo frames retain their original per-quad target/viewport replay. */
     if(!batch_supported && !n3ds_gpu_frame_is_mono()) return 0;
-    batch_first=used;batch_active=1;
+    batch_first=used;batch_active=TEXT_BATCH_SCREEN;
     return 1;
+}
+
+void n3ds_gpu_text_offscreen_batch_begin(void)
+{
+    if(batch_active) svcBreak(USERBREAK_PANIC);
+    batch_first=used;batch_active=TEXT_BATCH_OFFSCREEN;
 }
 
 int n3ds_gpu_text_batch_emit(void)
@@ -194,7 +199,7 @@ int n3ds_gpu_text_batch_emit(void)
     if(!batch_active) return 0;
     /* The caller publishes the exact atlas version before emitting the run. */
     int ok=batch_first==used || n3ds_presentation_midpoint_rejected() ||
-        emit_text_vertices(batch_first,used-batch_first,0);
+        emit_text_vertices(batch_first,used-batch_first,batch_active==TEXT_BATCH_OFFSCREEN);
     batch_first=used;
     HUD_PROFILE_END(3);
     return ok;
@@ -203,7 +208,23 @@ int n3ds_gpu_text_batch_emit(void)
 int n3ds_gpu_text_batch_end(void)
 {
     int ok=n3ds_gpu_text_batch_emit();
-    batch_active=0;
+    batch_active=TEXT_BATCH_NONE;
+    return ok;
+}
+
+int n3ds_gpu_text_offscreen_batch_end(void *resource,unsigned int border)
+{
+    C3D_Tex *texture=resource;
+    void *saved=n3ds_gpu_texture_bound(0);
+    unsigned int saved_border=texture->border;
+    texture->border=border;
+    int ok=n3ds_gpu_texture_bind(0,texture);
+    if(ok) ok=n3ds_gpu_text_batch_end();
+    else {
+        used=batch_first;batch_active=TEXT_BATCH_NONE;
+    }
+    texture->border=saved_border;
+    n3ds_gpu_texture_bind(0,saved);
     return ok;
 }
 
@@ -211,7 +232,8 @@ static int text_draw(const struct native_text_vertex vertices[4],int offscreen)
 {
     HUD_PROFILE_BEGIN();
     static const unsigned int order[6]={0,1,2,0,2,3};
-    if(!stream || used>TEXT_VERTICES-6 || (batch_active && offscreen)) return 0;
+    if(!stream || used>TEXT_VERTICES-6 ||
+       (batch_active && offscreen!=(batch_active==TEXT_BATCH_OFFSCREEN))) return 0;
     unsigned int first=used;
     for(unsigned int i=0;i<6;++i) {
         stream[first+i]=vertices[order[i]];
@@ -235,3 +257,27 @@ int n3ds_gpu_text_offscreen_begin(float width,float height)
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER,matrix_location,&projection);
     return 1;
 }
+#ifdef HALO_N3DS_PROBE_RADAR_INLINE_CLEAR
+void n3ds_gpu_text_offscreen_clear(float size)
+{
+    /* The square radar target has no depth attachment. Its offscreen text
+     * setup already establishes an unscissored viewport and no alpha test. */
+    C3D_TexEnv *env=C3D_GetTexEnv(0);
+    C3D_TexEnv original=*env;
+    C3D_TexEnvSrc(env,C3D_Both,GPU_CONSTANT,GPU_CONSTANT,GPU_CONSTANT);
+    C3D_TexEnvFunc(env,C3D_Both,GPU_REPLACE);
+    C3D_TexEnvColor(env,0);
+    C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_COLOR);
+    C3D_AlphaBlend(GPU_BLEND_ADD,GPU_BLEND_ADD,GPU_ONE,GPU_ZERO,GPU_ONE,GPU_ZERO);
+    /* Immediate vertices keep the HUD stream capacity unchanged. */
+    C3D_ImmDrawBegin(GPU_TRIANGLE_STRIP);
+    for(unsigned int i=0;i<4;++i) {
+        C3D_ImmSendAttrib(i&1?size:0,i&2?size:0,0,1);
+        C3D_ImmSendAttrib(1,1,1,1);
+        C3D_ImmSendAttrib(0,0,0,1);
+    }
+    C3D_ImmDrawEnd();
+    C3D_SetTexEnv(0,&original);
+    C3D_DepthTest(false,GPU_ALWAYS,GPU_WRITE_COLOR & ~GPU_WRITE_ALPHA);
+}
+#endif

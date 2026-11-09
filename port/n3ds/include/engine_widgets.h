@@ -2,6 +2,10 @@
 #define HALO_N3DS_ENGINE_WIDGETS_H
 struct native_widget_vertex {float position[3],color[4],uv[2];};
 struct native_packed_effect_vertex {float position[3],uv[2];unsigned int argb;};
+enum { N3DS_EFFECT_BATCH_VERTICES=384, N3DS_EFFECT_QUAD_INDICES=N3DS_EFFECT_BATCH_VERTICES*3/2 };
+#ifdef HALO_N3DS_RESIDENT_QUAD_INDICES
+const unsigned short *n3ds_gpu_effect_resident_quad_indices(void);
+#endif
 /* Optional affine rows transform original view-space positions. NULL is world. */
 int n3ds_gpu_effect_packed_draw(const struct native_packed_effect_vertex *,unsigned int,
     int,unsigned int,unsigned int,unsigned int,const float *rows);

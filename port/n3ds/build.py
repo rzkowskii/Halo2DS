@@ -65,14 +65,24 @@ ALGORITHMS = ('root_pose', 'vfp_schedule', 'support_corners', 'water_base',
               'prepared_view', 'shared_skinning', 'inverse_bind', 'midpoint_quaternions',
               'model_compact', 'collision_features', 'collision_active_planes', 'uv_outputs',
               'compressed_tracks', 'deferred_decode', 'stable_palette', 'retained_skin', 'local_hierarchy',
-              'boolean_selectors', 'skin_mad', 'midpoint_particles', 'region_selection')
-GPU_ALGORITHMS = ('uv_outputs', 'boolean_selectors', 'skin_mad', 'water_base')
+              'boolean_selectors', 'skin_mad', 'midpoint_particles', 'region_selection', 'model_uv_pack',
+              'model_view_pack', 'model_quaternion_direct', 'midpoint_swap_overlap', 'chicago_map_uv',
+              'chicago_neutral_draws', 'chicago_alpha_zero', 'model_reflection_direct', 'model_homogeneous',
+              'effect_homogeneous', 'model_clip_bounds', 'bsp_clip_blocks', 'bsp_clip_hierarchy')
+GPU_ALGORITHMS = ('uv_outputs', 'boolean_selectors', 'skin_mad', 'water_base', 'model_uv_pack',
+                  'model_view_pack', 'model_quaternion_direct', 'chicago_map_uv', 'model_reflection_direct',
+                  'model_homogeneous', 'effect_homogeneous')
 IMPLEMENTED_ALGORITHMS = ('prepared_view', 'shared_skinning', 'inverse_bind',
                           'midpoint_quaternions', 'root_pose', 'model_compact',
                           'collision_features', 'collision_active_planes', 'compressed_tracks',
                           'deferred_decode', 'stable_palette', 'retained_skin', 'local_hierarchy',
                           'bsp_resolved_batch', 'midpoint_particles', 'region_selection',
-                          'vfp_schedule', *GPU_ALGORITHMS)
+                          'vfp_schedule', 'adpcm_table', 'adpcm_loops', 'midpoint_swap_overlap', 'chicago_neutral_draws',
+                          'chicago_alpha_zero', 'model_clip_bounds', 'bsp_clip_blocks', 'bsp_clip_hierarchy', *GPU_ALGORITHMS)
+A30_RENDER_ALGORITHMS = ('prepared_view', 'uv_outputs', 'boolean_selectors', 'water_base',
+                         'model_view_pack', 'model_quaternion_direct', 'model_reflection_direct',
+                         'chicago_map_uv', 'model_homogeneous', 'effect_homogeneous',
+                         'model_clip_bounds', 'bsp_clip_blocks', 'bsp_clip_hierarchy')
 
 
 def run(command, out, label):
@@ -87,7 +97,8 @@ def run(command, out, label):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output', type=Path, default=ROOT/'build/n3ds')
+    parser.add_argument('--output', type=Path,
+                        help='Build directory (defaults to build/n3ds or a directory named after the startup preset)')
     defaults = {'devkitarm': 'C:/devkitPro/devkitARM', 'libctru': ROOT.parent/'libctru/libctru',
                 'citro3d': ROOT.parent/'citro3d', 'xdk': ROOT/'xbox/include'}
     for name, default in defaults.items():
@@ -98,6 +109,11 @@ def main():
     parser.add_argument('--jobs', type=int, default=2, choices=range(1, 9))
     parser.add_argument('--test-frames', type=int, default=0, help='0 produces the playable release; positive values stop after that many frames')
     parser.add_argument('--diagnostics', action='store_true', help='Enable renderer checks; requires --test-frames')
+    startup = parser.add_mutually_exclusive_group()
+    startup.add_argument('--startup-diagnostics', action='store_true',
+                         help='Automatically run the isolated A30 route and GPU checks, then exit with one SD report')
+    startup.add_argument('--startup-diagnostics-optimized', action='store_true',
+                         help='Run the same A30 startup diagnostic with optimized simulation and rendering')
     parser.add_argument('--original-memory', action='store_true', help='Constrain heap sizes for original-model emulator tests')
     parser.add_argument('--fixed-world-width', type=int, choices=(400, 320),
                         help='Fix the New-model world viewport for a render comparison')
@@ -113,6 +129,8 @@ def main():
                         help='New-model gameplay texture cache limit in MiB (default: 4)')
     parser.add_argument('--texture-prefetch', action='store_true',
                         help='Enable bounded texture preparation on New models')
+    parser.add_argument('--async-sound-cache', action='store_true',
+                        help='Let live sound-cache loads wait for the background reader on New models')
     parser.add_argument('--texture-compare', action='store_true',
                         help='Accept opt-in matched raw, LZ4 HC and exact native texture archives')
     parser.add_argument('--texture-compare-fixture', choices=('off', 'capture', 'timing'), default='off',
@@ -123,10 +141,30 @@ def main():
                         help='Use uncached portal projections for a baseline')
     parser.add_argument('--disable-resident-indices', action='store_true',
                         help='Upload all model triangle lists through the per-frame arena')
+    parser.add_argument('--byte-model-indices', action='store_true',
+                        help='Test byte-sized resident indices for recurring world models in the A30 benchmark')
+    parser.add_argument('--fast-contrail-verify', action='store_true',
+                        help='Validate trail point counts during the existing update traversal')
+    parser.add_argument('--resident-quad-indices', action='store_true',
+                        help='Reuse GPU-resident indices for eligible particle quad batches')
     parser.add_argument('--performance-profile', action='store_true',
                         help='Report frame percentiles, visibility and texture costs')
     parser.add_argument('--a30-benchmark', action='store_true',
                         help='Use a separate A30 benchmark log with fixed 400x240 gameplay profiling')
+    parser.add_argument('--a30-render-suite', action='store_true',
+                        help='Compare combined render preparation, command, shader and culling candidates; requires --a30-benchmark')
+    parser.add_argument('--compact-vertex-commands', action='store_true',
+                        help='Measure shorter Citro3D vertex-buffer commands in the A30 benchmark')
+    parser.add_argument('--compact-tev-commands', action='store_true',
+                        help='Measure deduplicated Citro3D texture-combiner commands in the A30 benchmark')
+    parser.add_argument('--compact-effect-commands', action='store_true',
+                        help='Measure shorter Citro3D depth, stencil and blend commands in the A30 benchmark')
+    parser.add_argument('--compact-shader-uploads', action='store_true',
+                        help='Measure redundant vertex shader uploads in the A30 benchmark')
+    parser.add_argument('--compact-uniform-uploads', action='store_true',
+                        help='Measure repeated vertex uniform uploads in the A30 benchmark')
+    parser.add_argument('--compact-command-suite', action='store_true',
+                        help='Combine the five command encoders for an A30 integration benchmark')
     parser.add_argument('--algorithm-profile', action='store_true',
                         help='Add bounded owner-side algorithm counters; requires --performance-profile')
     parser.add_argument('--allocation-profile', action='store_true',
@@ -136,7 +174,9 @@ def main():
     parser.add_argument('--dependency-trace', action='store_true',
                         help='Collect a bounded dependency event trace independently of profiling; export at shutdown')
     parser.add_argument('--dependency-trace-loops', type=int,
-                        help='Capture 1..18000 completed frontend loops after gameplay starts (default: 120); requires --dependency-trace')
+                        help='Capture 1..18000 completed frontend loops (default: 120); requires --dependency-trace')
+    parser.add_argument('--dependency-trace-start-tick', type=int,
+                        help='Begin tracing at or after this gameplay tick (default: 0); requires --dependency-trace')
     parser.add_argument('--gpu-probe', action='store_true',
                         help='Enable the paused-view GPU workload comparison; requires --fixed-world-width 400')
     parser.add_argument('--framebuffer-reuse', action='store_true',
@@ -145,10 +185,30 @@ def main():
                         help='Skip destination-color reads for exact RGBA overwrites; requires --fixed-world-width 400')
     parser.add_argument('--unused-texture-units', action='store_true',
                         help='Disable unused samplers on plain/detail terrain; requires --fixed-world-width 400')
+    parser.add_argument('--probe-effect-alpha-zero', action='store_true',
+                        help='Compare rejecting zero-alpha fragments in standard alpha particles; requires --gpu-probe')
+    parser.add_argument('--probe-neutral-model-tint', action='store_true',
+                        help='Compare bypassing white model tint combiners; requires --gpu-probe')
+    parser.add_argument('--probe-texture-rebinds', action='store_true',
+                        help='Compare removing redundant immutable sampler rebinds; requires --gpu-probe')
+    parser.add_argument('--probe-pixel-passes', action='store_true',
+                        help='Measure pixel coverage by paused render pass; requires --gpu-probe')
+    parser.add_argument('--probe-world-pixel-passes', action='store_true',
+                        help='Split paused world pixel coverage by sky, terrain, models, effects and coronas; requires --gpu-probe')
+    parser.add_argument('--probe-late-sky', action='store_true',
+                        help='Compare a stencil-masked sky after opaque terrain; requires --gpu-probe')
+    parser.add_argument('--probe-opaque-terrain-alpha', action='store_true',
+                        help='Compare skipping redundant alpha tests on opaque bump terrain; requires --gpu-probe')
+    parser.add_argument('--probe-radar-inline-clear', action='store_true',
+                        help='Compare clearing the radar within the draw list; requires --gpu-probe')
     parser.add_argument('--texture-vram-mirrors', action='store_true',
                         help='Mirror resident textures in spare VRAM; requires --fixed-world-width 400')
     for name in ALGORITHMS:
-        choices=('reference', 'candidate') if name in (*GPU_ALGORITHMS, 'bsp_resolved_batch', 'midpoint_particles') else tuple(ALGORITHM_MODES)
+        choices = ('reference', 'candidate') if name in (
+            *GPU_ALGORITHMS, 'adpcm_table', 'adpcm_loops', 'bsp_resolved_batch', 'midpoint_particles',
+            'midpoint_swap_overlap', 'chicago_neutral_draws', 'chicago_alpha_zero', 'model_clip_bounds',
+            'bsp_clip_blocks', 'bsp_clip_hierarchy',
+        ) else tuple(ALGORITHM_MODES)
         parser.add_argument('--algo-'+name.replace('_', '-'), choices=choices, default='reference',
                             help=('Independent experimental algorithm comparison' if name in IMPLEMENTED_ALGORITHMS
                                   else 'Independent algorithm comparison; only reference is implemented'))
@@ -157,17 +217,52 @@ def main():
         parser.add_argument('--'+name.replace('_', '-'), choices=tuple(modes), default=baseline,
                             help=f'Independent renderer mode (default: {baseline}); available: {", ".join(RENDERER_AVAILABLE[name])}')
     args = parser.parse_args()
+    if args.startup_diagnostics or args.startup_diagnostics_optimized:
+        build_options = {'startup_diagnostics', 'startup_diagnostics_optimized',
+                         'output', 'jobs', 'clang', 'picasso', 'packer', *defaults}
+        if any(value != parser.get_default(name) for name, value in vars(args).items()
+               if name not in build_options):
+            parser.error('--startup-diagnostics selects its own renderer and capture settings')
+        args.startup_diagnostics = True
+        args.fixed_world_width = 400
+        for name in (
+                'present_60', 'a30_benchmark', 'performance_profile', 'algorithm_profile',
+                'allocation_profile', 'dependency_trace', 'gpu_probe', 'framebuffer_reuse',
+                'skip_opaque_color_reads', 'unused_texture_units', 'probe_effect_alpha_zero',
+                'probe_neutral_model_tint', 'probe_texture_rebinds', 'probe_pixel_passes',
+                'probe_world_pixel_passes', 'probe_radar_inline_clear'):
+            setattr(args, name, True)
+        if args.startup_diagnostics_optimized:
+            args.byte_model_indices = True
+            args.async_sound_cache = True
+            # Keep the stock shaders and Citro3D command encoders. On a New
+            # 2DS XL the full render suite stalled after the first menu frame.
+            for name in ('vfp_schedule', 'prepared_view', 'model_clip_bounds',
+                         'bsp_clip_blocks', 'bsp_clip_hierarchy'):
+                setattr(args, 'algo_'+name, 'candidate')
+    if args.byte_model_indices and (not args.a30_benchmark or args.disable_resident_indices):
+        parser.error('--byte-model-indices requires --a30-benchmark and resident indices')
+    if args.algo_bsp_clip_hierarchy == 'candidate' and args.algo_bsp_clip_blocks != 'candidate':
+        parser.error('--algo-bsp-clip-hierarchy candidate requires --algo-bsp-clip-blocks candidate')
+    if args.a30_render_suite:
+        if not args.a30_benchmark:
+            parser.error('--a30-render-suite requires --a30-benchmark')
+        if any(getattr(args, 'algo_'+name) != 'reference' for name in ALGORITHMS):
+            parser.error('--a30-render-suite selects its own algorithm candidates')
+        for name in A30_RENDER_ALGORITHMS:
+            setattr(args, 'algo_'+name, 'candidate')
+        args.compact_command_suite = True
     for name in ALGORITHMS:
         if name not in IMPLEMENTED_ALGORITHMS and getattr(args, 'algo_'+name) != 'reference':
             parser.error(f'--algo-{name.replace("_", "-")} candidate/verify is reserved but not implemented')
     if not args.present_60 and any(getattr(args, 'algo_'+name) != 'reference' for name in
-                                  ('prepared_view', 'midpoint_quaternions', 'midpoint_particles')):
-        parser.error('Prepared view, midpoint quaternions and midpoint particles require --present-60')
+                                  ('midpoint_quaternions', 'midpoint_particles', 'midpoint_swap_overlap')):
+        parser.error('Midpoint algorithms require --present-60')
     if not 0 <= args.midpoint_capture_tick <= 0x7fffffff:
         parser.error('--midpoint-capture-tick must be 0..2147483647')
     if args.midpoint_capture_tick and (not args.present_60 or args.dependency_trace or args.performance_profile):
         parser.error('--midpoint-capture-tick requires --present-60 and a separate correctness run')
-    if args.action_replay != 'off' and (args.performance_profile or args.dependency_trace or args.test_frames or
+    if args.action_replay != 'off' and (args.async_sound_cache or args.performance_profile or args.dependency_trace or args.test_frames or
                                         args.diagnostics or args.original_memory or args.midpoint_capture_tick):
         parser.error('--action-replay requires a separate correctness run')
     if not 0 <= args.action_replay_fixture_ticks <= 3600 or (
@@ -184,22 +279,46 @@ def main():
         parser.error('--profile-frames cannot be combined with readback or validation fixtures')
     if args.dependency_trace_loops is not None and not args.dependency_trace:
         parser.error('--dependency-trace-loops requires --dependency-trace')
+    if args.dependency_trace_start_tick is not None and not args.dependency_trace:
+        parser.error('--dependency-trace-start-tick requires --dependency-trace')
+    if args.dependency_trace_start_tick is None:
+        args.dependency_trace_start_tick = 0
+    if not 0 <= args.dependency_trace_start_tick <= 0x7fffffff:
+        parser.error('--dependency-trace-start-tick must be 0..2147483647')
     if args.dependency_trace_loops is None:
         args.dependency_trace_loops = 120
     if not 1 <= args.dependency_trace_loops <= 18000:
         parser.error('--dependency-trace-loops must be 1..18000 completed frontend loops')
     if args.dependency_trace and (args.test_frames or args.diagnostics or args.original_memory):
         parser.error('--dependency-trace cannot be combined with readback or validation fixtures')
-    if args.skip_opaque_color_reads and args.framebuffer_reuse:
+    if args.skip_opaque_color_reads and args.framebuffer_reuse and not args.startup_diagnostics:
         parser.error('Measure --skip-opaque-color-reads independently of --framebuffer-reuse')
+    if args.probe_effect_alpha_zero and not args.gpu_probe:
+        parser.error('--probe-effect-alpha-zero requires --gpu-probe')
+    if args.probe_neutral_model_tint and not args.gpu_probe:
+        parser.error('--probe-neutral-model-tint requires --gpu-probe')
+    if args.probe_texture_rebinds and not args.gpu_probe:
+        parser.error('--probe-texture-rebinds requires --gpu-probe')
+    if (args.probe_pixel_passes or args.probe_world_pixel_passes) and not args.gpu_probe:
+        parser.error('Pixel pass probes require --gpu-probe')
+    if args.probe_late_sky and not args.gpu_probe:
+        parser.error('--probe-late-sky requires --gpu-probe')
+    if args.probe_opaque_terrain_alpha and not args.gpu_probe:
+        parser.error('--probe-opaque-terrain-alpha requires --gpu-probe')
+    if args.probe_radar_inline_clear and not args.gpu_probe:
+        parser.error('--probe-radar-inline-clear requires --gpu-probe')
     gpu_candidates = (args.framebuffer_reuse, args.skip_opaque_color_reads,
-                      args.unused_texture_units, args.texture_vram_mirrors)
-    if args.gpu_probe and sum(gpu_candidates) > 1:
+                      args.unused_texture_units, args.texture_vram_mirrors, args.probe_effect_alpha_zero,
+                      args.probe_texture_rebinds, args.probe_pixel_passes, args.probe_world_pixel_passes,
+                      args.probe_radar_inline_clear,
+                      args.probe_neutral_model_tint, args.probe_late_sky, args.probe_opaque_terrain_alpha)
+    if args.gpu_probe and sum(gpu_candidates) > 1 and not args.startup_diagnostics:
         parser.error('Measure one independent candidate at a time in --gpu-probe')
-    if (args.gpu_probe or any(gpu_candidates)) and (
+    if not args.startup_diagnostics and (args.gpu_probe or any(gpu_candidates)) and (
                            args.fixed_world_width != 400 or args.test_frames or args.diagnostics or
                            args.original_memory or args.present_60 or args.dependency_trace or
                            args.performance_profile or args.texture_prefetch or
+                           args.fast_contrail_verify or args.resident_quad_indices or
                            args.disable_portal_cache or args.disable_resident_indices or
                            args.texture_storage != 'legacy' or args.texture_cache_mib != 4 or
                            args.action_replay != 'off' or args.texture_compare_fixture != 'off' or
@@ -229,7 +348,8 @@ def main():
             args.action_replay != 'off' or args.dependency_trace or args.profile_frames or args.performance_profile or
             args.present_60 or args.texture_prefetch or args.texture_compare or args.texture_storage != 'legacy'):
         parser.error('texture LOD fixture requires native 400 and its own capture or timing configuration')
-    if args.present_60 and (args.test_frames or args.original_memory or args.fixed_world_width):
+    if args.present_60 and (args.test_frames or args.original_memory or
+                            (args.fixed_world_width and not args.startup_diagnostics)):
         parser.error('--present-60 requires a playable New-model build with its own native-resolution policy')
     # The diagnostic test-frame limit performs readbacks even without
     # --diagnostics. The independent profile-loop limit does not select it.
@@ -243,14 +363,34 @@ def main():
                               any(getattr(args, 'algo_'+name) == 'verify' for name in IMPLEMENTED_ALGORITHMS))
     uncaptured_profile_eligible = bool(args.performance_profile and not validation_configured and
                                        not algorithm_verification and not args.allocation_profile)
-    if args.a30_benchmark and (
-            args.fixed_world_width != 400 or not uncaptured_profile_eligible or
+    if args.a30_benchmark and not args.startup_diagnostics and (
+            (args.fixed_world_width != 400 and not args.present_60) or not uncaptured_profile_eligible or
             args.profile_frames or args.dependency_trace or args.texture_compare_fixture != 'off'):
-        parser.error('--a30-benchmark requires a playable --fixed-world-width 400 --performance-profile build')
-    run_purpose = ('validation-readback' if readback_configured else
+        parser.error('--a30-benchmark requires a playable --performance-profile build at --fixed-world-width 400 or --present-60')
+    command_options = ('compact_vertex_commands', 'compact_tev_commands', 'compact_effect_commands',
+                       'compact_shader_uploads', 'compact_uniform_uploads')
+    selected_commands = [name for name in command_options if getattr(args, name)]
+    if (selected_commands or args.compact_command_suite) and not args.a30_benchmark:
+        option = 'compact_command_suite' if args.compact_command_suite else selected_commands[0]
+        parser.error(f'--{option.replace("_", "-")} requires --a30-benchmark')
+    if len(selected_commands) > 1 or (args.compact_command_suite and selected_commands):
+        parser.error('Measure each compact command option separately')
+    if args.compact_command_suite:
+        for name in command_options:
+            setattr(args, name, True)
+    run_purpose = ('startup-diagnostics' if args.startup_diagnostics else
+                   'validation-readback' if readback_configured else
                    'validation-fixture' if validation_configured else
                    'algorithm-verification' if algorithm_verification else
                    'allocation-observation' if args.allocation_profile else
+                   'texture-rebind-probe' if args.probe_texture_rebinds else
+                   'world-pixel-passes-probe' if args.probe_world_pixel_passes else
+                   'late-sky-probe' if args.probe_late_sky else
+                   'opaque-terrain-alpha-probe' if args.probe_opaque_terrain_alpha else
+                   'pixel-passes-probe' if args.probe_pixel_passes else
+                   'radar-inline-clear-probe' if args.probe_radar_inline_clear else
+                   'effect-alpha-zero-probe' if args.probe_effect_alpha_zero else
+                   'neutral-model-tint-probe' if args.probe_neutral_model_tint else
                    'texture-vram-mirrors-probe' if args.gpu_probe and args.texture_vram_mirrors else
                    'unused-texture-units-probe' if args.gpu_probe and args.unused_texture_units else
                    'opaque-color-read-probe' if args.gpu_probe and args.skip_opaque_color_reads else
@@ -258,7 +398,10 @@ def main():
                    'gpu-workload-probe' if args.gpu_probe else
                    'dependency-trace-uncaptured' if args.dependency_trace else
                    'performance-uncaptured-candidate' if uncaptured_profile_eligible else 'gameplay')
-    out = args.output.resolve(); out.mkdir(parents=True, exist_ok=True)
+    default_output = ('startup-diagnostics-optimized' if args.startup_diagnostics_optimized else
+                      'startup-diagnostics' if args.startup_diagnostics else 'n3ds')
+    out = (args.output or ROOT/'build'/default_output).resolve()
+    out.mkdir(parents=True, exist_ok=True)
     for name in defaults:
         setattr(args, name, getattr(args, name).resolve())
     ext = '.exe' if os.name=='nt' else ''
@@ -268,12 +411,33 @@ def main():
     for path in [gcc, ar, args.libctru/'lib/libctru.a', args.citro3d/'lib/libcitro3d.a', args.xdk]:
         if not path.exists(): parser.error(f'Missing dependency: {path}')
     frame_adapter = args.present_60 or args.dependency_trace or args.gpu_probe or args.texture_vram_mirrors
-    context_adapter = args.skip_opaque_color_reads or args.unused_texture_units
+    context_adapter = args.skip_opaque_color_reads or args.unused_texture_units or args.probe_texture_rebinds
     pinned_citro3d = dict(CITRO3D_FRAME_SOURCE) if frame_adapter else {}
     if context_adapter:
         pinned_citro3d.update(CITRO3D_COLOR_READ_SOURCE)
+    if args.probe_texture_rebinds:
+        pinned_citro3d['texture.c'] = CITRO3D_TEXTURE_MIRROR_SOURCE['texture.c']
     if args.texture_vram_mirrors:
         pinned_citro3d.update(CITRO3D_TEXTURE_MIRROR_SOURCE)
+    if args.compact_vertex_commands:
+        pinned_citro3d.update(CITRO3D_FRAME_SOURCE)
+        pinned_citro3d['base.c'] = CITRO3D_COLOR_READ_SOURCE['base.c']
+        pinned_citro3d['buffers.c'] = '3d16ca5c551f2ab913b6790b99a515ac1636182ba83e66aeeb1d123d3d5966dc'
+    if args.compact_tev_commands:
+        pinned_citro3d.update(CITRO3D_FRAME_SOURCE)
+        pinned_citro3d['base.c'] = CITRO3D_COLOR_READ_SOURCE['base.c']
+        pinned_citro3d['texenv.c'] = '39915673b47a721579307bfd287ae2128def0ace9cbb0427ccbed72964c3786d'
+    if args.compact_effect_commands:
+        pinned_citro3d.update(CITRO3D_FRAME_SOURCE)
+        pinned_citro3d['base.c'] = CITRO3D_COLOR_READ_SOURCE['base.c']
+        pinned_citro3d['effect.c'] = CITRO3D_COLOR_READ_SOURCE['effect.c']
+    if args.compact_shader_uploads:
+        pinned_citro3d.update(CITRO3D_FRAME_SOURCE)
+        pinned_citro3d['base.c'] = CITRO3D_COLOR_READ_SOURCE['base.c']
+    if args.compact_uniform_uploads:
+        pinned_citro3d.update(CITRO3D_FRAME_SOURCE)
+        pinned_citro3d['base.c'] = CITRO3D_COLOR_READ_SOURCE['base.c']
+        pinned_citro3d['uniforms.c'] = 'd679e1ff7dcad9c9175cbe0860add73a9d947aac9472025e843f017e67e81830'
     for name, expected in pinned_citro3d.items():
         path = args.citro3d/'source'/name
         if not path.is_file() or hashlib.sha256(path.read_bytes().replace(b'\r\n', b'\n')).hexdigest() != expected:
@@ -302,7 +466,15 @@ def main():
         entries = [entry for entry in entries if not entry.get('citro3d_frame_adapter')]
     if not context_adapter:
         entries = [entry for entry in entries if not entry.get('citro3d_color_read_adapter')]
+    if not args.compact_uniform_uploads:
+        entries = [entry for entry in entries if not entry.get('citro3d_uniform_adapter')]
     defines = ['-DHALO_N3DS_CHECKPOINT_FEATURE=1',f'-DHALO_N3DS_MISSION_TICKS={args.test_frames}']
+    if args.startup_diagnostics:
+        defines.append('-DHALO_N3DS_STARTUP_DIAGNOSTICS=1')
+    if args.startup_diagnostics_optimized:
+        defines.append('-DHALO_N3DS_STARTUP_DIAGNOSTICS_OPTIMIZED=1')
+    if args.async_sound_cache:
+        defines.append('-DHALO_N3DS_ASYNC_SOUND_IDLE=1')
     for name, modes in RENDERER_MODES.items():
         defines.append(f'-DHALO_N3DS_{name.upper()}={modes[getattr(args, name)]}')
     for name in ALGORITHMS:
@@ -317,9 +489,26 @@ def main():
         defines.append('-DHALO_N3DS_ALLOCATION_PROFILE=1')
     if args.dependency_trace:
         defines.extend(('-DHALO_N3DS_DEPENDENCY_TRACE=1',
-                        f'-DHALO_N3DS_DEPENDENCY_TRACE_LOOPS={args.dependency_trace_loops}'))
+                        f'-DHALO_N3DS_DEPENDENCY_TRACE_LOOPS={args.dependency_trace_loops}',
+                        f'-DHALO_N3DS_DEPENDENCY_TRACE_START_TICK={args.dependency_trace_start_tick}'))
     if args.gpu_probe:
         defines.append('-DHALO_N3DS_GPU_PROBE=1')
+    if args.probe_effect_alpha_zero:
+        defines.append('-DHALO_N3DS_PROBE_EFFECT_ALPHA_ZERO=1')
+    if args.probe_neutral_model_tint:
+        defines.append('-DHALO_N3DS_PROBE_NEUTRAL_MODEL_TINT=1')
+    if args.probe_texture_rebinds:
+        defines.append('-DHALO_N3DS_PROBE_TEXTURE_REBINDS=1')
+    if args.probe_pixel_passes or args.probe_world_pixel_passes:
+        defines.append('-DHALO_N3DS_PROBE_PIXEL_PASSES=1')
+    if args.probe_world_pixel_passes:
+        defines.append('-DHALO_N3DS_PROBE_WORLD_PIXEL_PASSES=1')
+    if args.probe_late_sky:
+        defines.append('-DHALO_N3DS_PROBE_LATE_SKY=1')
+    if args.probe_opaque_terrain_alpha:
+        defines.append('-DHALO_N3DS_PROBE_OPAQUE_TERRAIN_ALPHA=1')
+    if args.probe_radar_inline_clear:
+        defines.append('-DHALO_N3DS_PROBE_RADAR_INLINE_CLEAR=1')
     if args.framebuffer_reuse:
         defines.append('-DHALO_N3DS_FRAMEBUFFER_REUSE=1')
     if args.skip_opaque_color_reads:
@@ -347,10 +536,30 @@ def main():
         defines.append('-DHALO_N3DS_DISABLE_PORTAL_CACHE=1')
     if args.disable_resident_indices:
         defines.append('-DHALO_N3DS_DISABLE_RESIDENT_INDICES=1')
+    if args.byte_model_indices:
+        defines.append('-DHALO_N3DS_BYTE_MODEL_INDICES=1')
+    if args.fast_contrail_verify:
+        defines.append('-DHALO_N3DS_FAST_CONTRAIL_VERIFY=1')
+    if args.resident_quad_indices:
+        defines.append('-DHALO_N3DS_RESIDENT_QUAD_INDICES=1')
     if args.performance_profile:
         defines.extend(('-DHALO_N3DS_PERFORMANCE_PROFILE=1', '-DHALO_N3DS_TEXTURE_PROFILE=1'))
     if args.a30_benchmark:
         defines.append('-DHALO_N3DS_A30_BENCHMARK=1')
+    if args.a30_render_suite:
+        defines.append('-DHALO_N3DS_A30_RENDER_SUITE=1')
+    if args.compact_vertex_commands:
+        defines.append('-DHALO_N3DS_COMPACT_VERTEX_COMMANDS=1')
+    if args.compact_tev_commands:
+        defines.append('-DHALO_N3DS_COMPACT_TEV_COMMANDS=1')
+    if args.compact_effect_commands:
+        defines.append('-DHALO_N3DS_COMPACT_EFFECT_COMMANDS=1')
+    if args.compact_shader_uploads:
+        defines.append('-DHALO_N3DS_COMPACT_SHADER_UPLOADS=1')
+    if args.compact_uniform_uploads:
+        defines.append('-DHALO_N3DS_COMPACT_UNIFORM_UPLOADS=1')
+    if args.compact_command_suite:
+        defines.append('-DHALO_N3DS_COMPACT_COMMAND_SUITE=1')
     source_date_epoch=os.environ.get('SOURCE_DATE_EPOCH')
     identity_dependencies=external_build_inputs(args.devkitarm,gcc,ar,args.clang,args.libctru,args.citro3d,
         PORT/'n3ds.specs',COMMON,ROOT)
@@ -379,7 +588,9 @@ def main():
         command=list(native if entry['compiler']=='gcc' else game)+shared
         if entry['compiler']=='gcc':
             command+=['-std=gnu++11','-fno-exceptions','-fno-rtti'] if source.suffix=='.cpp' else ['-std=gnu11']
-            if entry.get('citro3d_frame_adapter') or entry.get('citro3d_color_read_adapter'):
+            if (entry.get('citro3d_frame_adapter') or entry.get('citro3d_color_read_adapter') or
+                    entry.get('citro3d_uniform_adapter') or
+                    (args.compact_effect_commands and entry['source'] == 'port/n3ds/src/engine_gpu_renderer.c')):
                 command+=['-iquote',str(args.citro3d/'source')]
         else:
             sdk=entry.get('sdk',True)
@@ -416,8 +627,16 @@ def main():
     wraps = WRAPS + (['malloc', 'calloc', 'memalign', 'aligned_alloc'] if args.allocation_profile else [])
     if args.skip_opaque_color_reads:
         wraps += list(CITRO3D_COLOR_READ_WRAPS)
-    elif args.unused_texture_units:
+    elif args.unused_texture_units or args.probe_texture_rebinds:
         wraps.append('C3Di_UpdateContext')
+    if args.compact_vertex_commands:
+        wraps.append('C3Di_BufInfoBind')
+    if args.compact_tev_commands:
+        wraps.append('C3Di_TexEnvBind')
+    if args.compact_effect_commands:
+        wraps.append('C3Di_EffectBind')
+    if args.compact_shader_uploads:
+        wraps.append('shaderProgramConfigure')
     link=[str(gcc),*COMMON,'-specs='+str(PORT/'n3ds.specs'),'-Wl,--gc-sections','-Wl,-Map='+str(out/'Halo3DS.map'),
           *['-Wl,--wrap='+name for name in wraps],*map(str,objects),str(archive),'-L',str(args.citro3d/'lib'),
           '-lcitro3d','-L',str(args.libctru/'lib'),'-lctru','-lm','-o',str(elf)]
@@ -445,7 +664,8 @@ def main():
                                 'independent_of_profile':True,
                                 'schema_version':1,'header_bytes':128,'record_bytes':64,'footer_bytes':16,
                                 'capture_loop_limit':args.dependency_trace_loops if args.dependency_trace else 0,
-                                'capture_start':'first gameplay loop',
+                                'capture_start':'first eligible gameplay loop at or after start tick',
+                                'capture_start_tick':args.dependency_trace_start_tick,
                                 'capture_limit_unit':'completed frontend loops; not ticks or presentations',
                                 'owner_event_capacity':8192,'owner_event_bytes':64,
                                 'callback_ring_capacity':256,'vblank_ring_capacity':256,
@@ -455,7 +675,8 @@ def main():
                                 'buffer_bytes_exclude':'collector contexts/scalars, stack and stdio export storage',
                                 'overflow_policy':'drop new records; never overwrite retained events',
                                 'export':'shutdown only; capture limit does not end gameplay',
-                                'export_path':'sdmc:/halo-trace-%016llx.bin (run ID)',
+                                'export_path':('sdmc:/halo-startup-diagnostics.log (summary)'
+                                               if args.startup_diagnostics else 'sdmc:/halo-trace-%016llx.bin (run ID)'),
                                 'checksum':'FNV-1a32 over header and records; trailer excluded',
                                 'tail_always_unconfirmed':True,
                                 'instrumentation_overhead':'unmeasured',
@@ -465,6 +686,11 @@ def main():
                                  **{name:{'mode':getattr(args,name),'id':modes[getattr(args,name)]}
                                     for name,modes in RENDERER_MODES.items()}},
             'renderer_run':{'purpose':run_purpose,'configured_readback':readback_configured,
+                            'startup_diagnostics':args.startup_diagnostics,
+                            'startup_diagnostics_preset':('optimized' if args.startup_diagnostics_optimized else
+                                                          'reference' if args.startup_diagnostics else None),
+                            'startup_diagnostics_report':('sdmc:/halo-startup-diagnostics.log'
+                                                          if args.startup_diagnostics else None),
                             'texture_compare':args.texture_compare,
                             'texture_compare_fixture':args.texture_compare_fixture,
                             'texture_lod_fixture':args.texture_lod_fixture,
@@ -479,14 +705,33 @@ def main():
                             'external_capture':'unverified',
                             'evidence':'configuration only; not validation or measured performance'},
             'performance':{'fixed_world_width':args.fixed_world_width,'texture_cache_mib':args.texture_cache_mib,
+                           'async_sound_cache':args.async_sound_cache,
                            'texture_vram_mirrors':args.texture_vram_mirrors,
                            'unused_texture_units':args.unused_texture_units,
+                           'probe_effect_alpha_zero':args.probe_effect_alpha_zero,
+                           'probe_neutral_model_tint':args.probe_neutral_model_tint,
+                           'probe_texture_rebinds':args.probe_texture_rebinds,
+                           'probe_pixel_passes':args.probe_pixel_passes,
+                           'probe_world_pixel_passes':args.probe_world_pixel_passes,
+                           'probe_late_sky':args.probe_late_sky,
+                           'probe_opaque_terrain_alpha':args.probe_opaque_terrain_alpha,
+                           'probe_radar_inline_clear':args.probe_radar_inline_clear,
                            'skip_opaque_color_reads':args.skip_opaque_color_reads,
                            'framebuffer_reuse':args.framebuffer_reuse,
                            'present_60':args.present_60,
                            'texture_prefetch':args.texture_prefetch,'portal_cache':not args.disable_portal_cache,
                            'resident_indices':not args.disable_resident_indices,
+                           'byte_model_indices':args.byte_model_indices,
+                           'fast_contrail_verify':args.fast_contrail_verify,
+                           'resident_quad_indices':args.resident_quad_indices,
                            'a30_benchmark':args.a30_benchmark,
+                           'a30_render_suite':args.a30_render_suite,
+                           'compact_vertex_commands':args.compact_vertex_commands,
+                           'compact_tev_commands':args.compact_tev_commands,
+                           'compact_effect_commands':args.compact_effect_commands,
+                           'compact_shader_uploads':args.compact_shader_uploads,
+                           'compact_uniform_uploads':args.compact_uniform_uploads,
+                           'compact_command_suite':args.compact_command_suite,
                            'profile':args.performance_profile},
             'checkpoint_identity':build_id,'checkpoint_identity_source_sha256':source_digest,
             'checkpoint_identity_external_sha256':external_digest,'checkpoint_identity_dependencies':identity_dependencies,
