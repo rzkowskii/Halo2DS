@@ -2,6 +2,8 @@
 
 Halo3DS brings the original Xbox release of *Halo: Combat Evolved* to the Nintendo 3DS and 2DS family. This fork focuses on making the campaign run better on the New 2DS XL while keeping the game's look and timing.
 
+[Screenshots from all ten campaign missions](docs/screenshots/README.md)
+
 ## 343 Guilty Spark
 
 <p>
