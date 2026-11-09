@@ -2,7 +2,7 @@
 
 Halo3DS brings the original Xbox release of *Halo: Combat Evolved* to the Nintendo 3DS and 2DS family. This fork focuses on making the campaign run better on the New 2DS XL while keeping the game's look and timing.
 
-[Screenshots from all ten campaign missions](docs/screenshots/README.md)
+[Screenshots from all ten campaign missions](#campaign-screenshots)
 
 ## 343 Guilty Spark
 
@@ -37,6 +37,63 @@ You need a modded 3DS or 2DS, a FAT32 SD card with at least 4 GB free, and your 
 ## In game
 
 Press **SELECT** for **Controller Settings** or **Y** for **Graphics Options** from the main or pause menu. By default, **L** fires. **ZL** throws grenades on New models, and **R** throws them on original models.
+
+## Campaign screenshots
+
+Captured at native 400×240 resolution in Azahar's New 3DS mode.
+
+<table>
+  <tr>
+    <td width="50%">
+      <strong>1. The Pillar of Autumn</strong><br>
+      <img src="docs/screenshots/the-pillar-of-autumn.png" alt="A crewman stands outside the cryopod as Master Chief wakes" width="400">
+    </td>
+    <td width="50%">
+      <strong>2. Halo</strong><br>
+      <img src="docs/screenshots/halo.png" alt="A burning craft above a valley of conifers and pale cliffs" width="400">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>3. The Truth and Reconciliation</strong><br>
+      <img src="docs/screenshots/the-truth-and-reconciliation.png" alt="A Pelican descends into a canyon with its searchlights on" width="400">
+    </td>
+    <td width="50%">
+      <strong>4. The Silent Cartographer</strong><br>
+      <img src="docs/screenshots/the-silent-cartographer.png" alt="Two Pelicans fly toward the island over the ocean" width="400">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>5. Assault on the Control Room</strong><br>
+      <img src="docs/screenshots/assault-on-the-control-room.png" alt="A Grunt and a Jackal patrol a Forerunner chamber" width="400">
+    </td>
+    <td width="50%">
+      <strong>6. 343 Guilty Spark</strong><br>
+      <img src="docs/screenshots/343-guilty-spark-clearing.png" alt="Spotlights sweep the flooded clearing as a Covenant patrol crosses the swamp" width="400">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>7. The Library</strong><br>
+      <img src="docs/screenshots/the-library.png" alt="The blue light of 343 Guilty Spark at the center of a Forerunner shaft" width="400">
+    </td>
+    <td width="50%">
+      <strong>8. Two Betrayals</strong><br>
+      <img src="docs/screenshots/two-betrayals.png" alt="Master Chief appears in a golden teleport beam beside 343 Guilty Spark" width="400">
+    </td>
+  </tr>
+  <tr>
+    <td width="50%">
+      <strong>9. Keyes</strong><br>
+      <img src="docs/screenshots/keyes.png" alt="First-person view down a Covenant cruiser corridor on the way to the control room" width="400">
+    </td>
+    <td width="50%">
+      <strong>10. The Maw</strong><br>
+      <img src="docs/screenshots/the-maw.png" alt="A wreck beyond the amber dunes under storm clouds" width="400">
+    </td>
+  </tr>
+</table>
 
 ## Benchmark and report issues
 
